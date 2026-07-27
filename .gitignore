@@ -1,0 +1,43 @@
+# Local Codex/agent state
+/.agents/
+/.codex/
+/Agent.md
+
+# Superseded local copy and broken nested Git metadata
+/VESC_K2_TEST/
+
+# Temporary extraction and archives
+/.tmp_pdf_images/
+/*.zip
+
+# ESP-IDF generated content
+/ESP32_VCU_Gateway/build*/
+/ESP32_VCU_Gateway/VESC_K2_TEST/
+/ESP32_VCU_Gateway/managed_components/
+/ESP32_VCU_Gateway/sdkconfig.old
+/ESP32_VCU_Gateway/.vscode/
+/ESP32_VCU_Gateway/main/lispBM/test_reports/
+
+# Keil generated content
+/STM32F407/MDK-ARM/STM32F407/
+/STM32F407/MDK-ARM/*.log
+/STM32F407/MDK-ARM/*.bak
+/STM32F407/MDK-ARM/*.dep
+/STM32F407/MDK-ARM/*.uvguix.*
+/STM32F407/MDK-ARM/*.scvd
+/STM32F407/MDK-ARM/JLinkLog.txt
+
+# Generic generated files
+*.o
+*.obj
+*.d
+*.crf
+*.axf
+*.elf
+*.hex
+*.bin
+*.map
+*.lst
+*.tmp
+*.bak
+Thumbs.db

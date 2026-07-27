@@ -1,0 +1,786 @@
+/*
+	Copyright 2022 Benjamin Vedder	benjamin@vedder.se
+
+	This file is part of the VESC firmware.
+
+	The VESC firmware is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    The VESC firmware is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include "log.h"
+#include "conf_general.h"
+#include "nmea.h"
+#include "commands.h"
+#include "terminal.h"
+
+#include "esp_vfs_fat.h"
+#include "esp_err.h"
+#ifdef HW_INTERNAL_FS
+#include "esp_spiffs.h"
+#endif
+#include "sdmmc_cmd.h"
+#include "esp_vfs.h"
+#include "buffer.h"
+#include "utils.h"
+#include "esp_vfs_fat_nand.h"
+
+#include <string.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <errno.h>
+#include <dirent.h>
+#include <unistd.h>
+#include <stdlib.h>
+
+typedef struct {
+	char key[25];
+	char name[30];
+	char unit[10];
+	int8_t precision;
+	bool is_relative;
+	bool is_timestamp;
+	double value;
+	bool updated;
+} log_header;
+
+#define LOG_MAX_FIELDS		120
+
+char *file_basepath = "/sdcard/";
+
+// Private variables
+static sdmmc_host_t m_host = SDSPI_HOST_DEFAULT();
+static sdmmc_card_t *m_card = 0;
+static esp_err_t m_last_card_mount_res = ESP_ERR_INVALID_STATE;
+static esp_err_t m_last_card_spi_res = ESP_ERR_INVALID_STATE;
+static const char *m_last_card_mount_stage = "not attempted";
+static int m_last_card_pin_mosi = -1;
+static int m_last_card_pin_miso = -1;
+static int m_last_card_pin_sck = -1;
+static int m_last_card_pin_cs = -1;
+static int m_last_card_freq = 0;
+static spi_nand_flash_device_t *nand_flash_device_handle = 0;
+#ifdef HW_INTERNAL_FS
+static bool m_storage_mounted = false;
+#endif
+
+static volatile log_header m_headers[LOG_MAX_FIELDS];
+
+static log_header m_header_ts;
+static log_header m_header_ts_gnss;
+static log_header m_header_lat;
+static log_header m_header_lon;
+static log_header m_header_alt;
+static log_header m_header_hacc;
+static log_header m_header_hvel;
+
+static volatile int m_field_num = 0;
+static volatile float m_rate_hz = 10.0;
+static volatile bool m_append_time = false;
+static volatile bool m_append_gnss = false;
+static volatile bool m_append_gnss_time = false;
+
+static void print_header(log_header *h, FILE *file) {
+	fprintf(file, "%s:%s:%s:%d:%d:%d",
+			h->key, h->name, h->unit,
+			h->precision, h->is_relative, h->is_timestamp);
+}
+
+static void log_task(void *arg) {
+	FILE *f_log = 0;
+	int gga_cnt_last = 0;
+	int rmc_cnt_last = 0;
+	int64_t ms_last = utils_ms_tot();
+	TickType_t tick_last_fsync = xTaskGetTickCount();
+
+	for (;;) {
+		if (!m_card) {
+			vTaskDelay(10);
+			continue;
+		}
+
+		nmea_state_t *s = nmea_get_state();
+
+		bool date_valid = true;
+		if (s->rmc.yy < 0 || s->rmc.mo < 0 || s->rmc.dd < 0 ||
+				s->rmc.hh < 0 || s->rmc.mm < 0 || s->rmc.ss < 0) {
+			date_valid = false;
+		}
+
+		bool gga_updated = false;
+		if (s->gga_cnt != gga_cnt_last) {
+			gga_updated = true;
+			gga_cnt_last = s->gga_cnt;
+		}
+
+		bool rmc_updated = false;
+		if (s->rmc_cnt != rmc_cnt_last) {
+			rmc_updated = true;
+			rmc_cnt_last = s->rmc_cnt;
+		}
+
+		if (m_field_num > 0 && !f_log) {
+			if ((m_append_gnss || m_append_gnss_time) && !date_valid) {
+				vTaskDelay(configTICK_RATE_HZ / 100);
+				continue;
+			}
+			
+			char path[200];
+
+			// Note: This directory is created when COMM_LOG_START is
+			//   received.
+			sprintf(path, "%slog_can/", file_basepath);
+			DIR *dir = opendir(path);
+			if (dir) {
+				int highest_index = -1;
+				struct dirent *entry;
+				while ((entry = readdir(dir)) != NULL) {
+					// Log name example: "log_001_2025-04-07_17-37-00.csv"
+					if (entry->d_type == DT_REG
+						&& strncmp(entry->d_name, "log_", 4) == 0) {
+						const char *index_start =
+							&entry->d_name[strlen("log_")];
+
+						char *digits_end;
+
+						int index = (int)strtol(index_start, &digits_end, 10);
+						if (digits_end != index_start
+							&& index > highest_index) {
+							highest_index = index;
+						}
+					}
+				}
+				closedir(dir);
+
+				if (date_valid) {
+					sprintf(
+						path,
+						"%slog_can/log_%03d_%02d-%02d-%02d_%02d-%02d-%02d.csv",
+						file_basepath, highest_index + 1, s->rmc.yy, s->rmc.mo,
+						s->rmc.dd, s->rmc.hh, s->rmc.mm, s->rmc.ss
+					);
+				} else {
+					sprintf(
+						path, "%slog_can/log_%03d.csv", file_basepath,
+						highest_index + 1
+					);
+				}
+				f_log = fopen(path, "w");
+			}
+
+			if (f_log) {
+				// To get the first sample
+				gga_updated = true;
+				rmc_updated = true;
+
+				for (int i = 0;i < m_field_num;i++) {
+					print_header((log_header*)&m_headers[i], f_log);
+					if (i == (m_field_num - 1)) {
+						if (m_append_time || m_append_gnss_time || m_append_gnss) {
+							fprintf(f_log, ";");
+						}
+
+						if (m_append_time) {
+							print_header(&m_header_ts, f_log);
+							if (m_append_gnss_time || m_append_gnss) {
+								fprintf(f_log, ";");
+							}
+						}
+
+						if (m_append_gnss_time) {
+							print_header(&m_header_ts_gnss, f_log);
+							if (m_append_gnss) {
+								fprintf(f_log, ";");
+							}
+						}
+
+						if (m_append_gnss) {
+							print_header(&m_header_lat, f_log);
+							fprintf(f_log, ";");
+
+							print_header(&m_header_lon, f_log);
+							fprintf(f_log, ";");
+
+							print_header(&m_header_alt, f_log);
+							fprintf(f_log, ";");
+
+							print_header(&m_header_hacc, f_log);
+							fprintf(f_log, ";");
+
+							print_header(&m_header_hvel, f_log);
+						}
+
+						fprintf(f_log, "\n");
+					} else {
+						fprintf(f_log, ";");
+					}
+				}
+			}
+		}
+
+		if (m_field_num <= 0 && f_log) {
+			fclose(f_log);
+			f_log = 0;
+		}
+
+		if (f_log) {
+			for (int i = 0;i < m_field_num;i++) {
+				log_header *h = (log_header*)&m_headers[i];
+				if (h->updated) {
+					fprintf(f_log, "%.*f", h->precision, h->value);
+					h->updated = false;
+				}
+				if (i == (m_field_num - 1)) {
+					if (m_append_time || m_append_gnss_time || m_append_gnss) {
+						fprintf(f_log, ";");
+					}
+
+					if (m_append_time) {
+						fprintf(f_log, "%.3f", (float)utils_ms_today() / 1000.0);
+						if (m_append_gnss_time || m_append_gnss) {
+							fprintf(f_log, ";");
+						}
+					}
+
+					if (m_append_gnss_time) {
+						if (gga_updated) {
+							fprintf(f_log, "%.3f", (float)s->gga.ms_today / 1000.0);
+						}
+						if (m_append_gnss) {
+							fprintf(f_log, ";");
+						}
+					}
+
+					if (m_append_gnss) {
+						if (gga_updated) {
+							fprintf(f_log, "%.8f", s->gga.lat);
+						}
+						fprintf(f_log, ";");
+
+						if (gga_updated) {
+							fprintf(f_log, "%.8f", s->gga.lon);
+						}
+						fprintf(f_log, ";");
+
+						if (gga_updated) {
+							fprintf(f_log, "%.2f", s->gga.height);
+						}
+						fprintf(f_log, ";");
+
+						if (gga_updated) {
+							fprintf(f_log, "%.2f", s->gga.h_dop * 4.0);
+						}
+						fprintf(f_log, ";");
+
+						if (rmc_updated) {
+							fprintf(f_log, "%.2f", s->rmc.speed * 3.6);
+						}
+					}
+
+					fprintf(f_log, "\n");
+				} else {
+					fprintf(f_log, ";");
+				}
+			}
+
+			if (UTILS_AGE_S(tick_last_fsync) > 2.0) {
+				tick_last_fsync = xTaskGetTickCount();
+				fsync(fileno(f_log));
+			}
+		}
+
+		if (m_rate_hz < 0.1) {
+			m_rate_hz = 10.0;
+		}
+
+		float task_time = (float)(utils_ms_tot() - ms_last) / 1000.0;
+		int sleep_time = (int)((float)configTICK_RATE_HZ  * ((1.0 / m_rate_hz) - task_time));
+		if (sleep_time < 0) {
+			sleep_time = 1;
+		}
+		vTaskDelay(sleep_time);
+		ms_last = utils_ms_tot();
+	}
+}
+
+esp_err_t log_mount_card(int pin_mosi, int pin_miso, int pin_sck, int pin_cs, int freq) {
+	esp_err_t ret;
+
+	m_last_card_pin_mosi = pin_mosi;
+	m_last_card_pin_miso = pin_miso;
+	m_last_card_pin_sck = pin_sck;
+	m_last_card_pin_cs = pin_cs;
+	m_last_card_freq = freq;
+	m_last_card_mount_stage = "spi bus init";
+	m_last_card_mount_res = ESP_ERR_INVALID_STATE;
+	m_last_card_spi_res = ESP_ERR_INVALID_STATE;
+
+	esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+			.format_if_mount_failed = true,
+			.max_files = 5,
+			.allocation_unit_size = 8192
+	};
+
+	m_host.max_freq_khz = freq;
+
+	spi_bus_config_t bus_cfg = {
+			.mosi_io_num = pin_mosi,
+			.miso_io_num = pin_miso,
+			.sclk_io_num = pin_sck,
+			.quadwp_io_num = -1,
+			.quadhd_io_num = -1,
+			.max_transfer_sz = 4092,
+	};
+
+	log_unmount_card();
+
+	ret = spi_bus_initialize(m_host.slot, &bus_cfg, SDSPI_DEFAULT_DMA);
+	m_last_card_spi_res = ret;
+	if (ret != ESP_OK) {
+		m_last_card_mount_res = ret;
+		return ret;
+	}
+
+	sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+	slot_config.gpio_cs = pin_cs;
+	slot_config.host_id = m_host.slot;
+
+	file_basepath = "/sdcard/";
+	m_last_card_mount_stage = "fat sdspi mount";
+	ret = esp_vfs_fat_sdspi_mount("/sdcard", &m_host, &slot_config, &mount_config, &m_card);
+	m_last_card_mount_res = ret;
+	if (ret == ESP_OK) {
+		m_last_card_mount_stage = "mounted";
+	}
+
+	return ret;
+}
+
+void log_unmount_card(void) {
+	if (m_card) {
+		esp_vfs_fat_sdcard_unmount("/sdcard", m_card);
+		m_card = 0;
+	}
+
+	spi_bus_free(m_host.slot);
+}
+
+static void print_sd_error(const char *label, esp_err_t err) {
+	commands_printf("%s: %s (%d)", label, esp_err_to_name(err), err);
+}
+
+static void terminal_sd_status(int argc, const char **argv) {
+	(void)argc;
+	(void)argv;
+
+	commands_printf(
+			"SD card status\n"
+			"mounted     : %d\n"
+			"base path   : %s\n"
+			"stage       : %s\n"
+			"mosi        : %d\n"
+			"miso        : %d\n"
+			"sck         : %d\n"
+			"cs          : %d\n"
+			"freq khz    : %d",
+			m_card != 0,
+			file_basepath,
+			m_last_card_mount_stage,
+			m_last_card_pin_mosi,
+			m_last_card_pin_miso,
+			m_last_card_pin_sck,
+			m_last_card_pin_cs,
+			m_last_card_freq);
+
+	print_sd_error("spi init", m_last_card_spi_res);
+	print_sd_error("mount", m_last_card_mount_res);
+
+	if (m_card) {
+		uint32_t capacity_mb = (uint32_t)((uint64_t)m_card->csd.capacity *
+				m_card->csd.sector_size / (1024ULL * 1024ULL));
+
+		commands_printf(
+				"card name   : %.5s\n"
+				"sector size : %d\n"
+				"capacity MB : %lu",
+				m_card->cid.name,
+				m_card->csd.sector_size,
+				(unsigned long)capacity_mb);
+	}
+}
+
+static void terminal_sd_mount(int argc, const char **argv) {
+	int freq = SDMMC_FREQ_DEFAULT;
+
+	if (argc >= 2) {
+		freq = strtol(argv[1], 0, 0);
+	}
+
+#ifdef SD_PIN_MOSI
+	esp_err_t ret = log_mount_card(SD_PIN_MOSI, SD_PIN_MISO, SD_PIN_SCK, SD_PIN_CS, freq);
+	if (ret == ESP_OK) {
+		commands_printf("SD mounted.");
+	} else {
+		commands_printf("SD mount failed at %s.", m_last_card_mount_stage);
+		print_sd_error("result", ret);
+	}
+#else
+	commands_printf("SD pins are not defined for this hardware target.");
+#endif
+}
+
+static void terminal_sd_unmount(int argc, const char **argv) {
+	(void)argc;
+	(void)argv;
+
+	log_unmount_card();
+	commands_printf("SD unmounted.");
+}
+
+static void terminal_sd_test(int argc, const char **argv) {
+	(void)argc;
+	(void)argv;
+
+	if (!m_card) {
+		commands_printf("SD is not mounted. Run sd_mount first.");
+		return;
+	}
+
+	struct stat st;
+	errno = 0;
+	if (stat("/sdcard", &st) != 0) {
+		commands_printf("stat /sdcard failed, errno %d: %s", errno, strerror(errno));
+		return;
+	}
+
+	commands_printf("/sdcard mode: 0%lo", (unsigned long)st.st_mode);
+
+	errno = 0;
+	if (mkdir("/sdcard/sd_test_dir", 0775) != 0 && errno != EEXIST) {
+		commands_printf("mkdir /sdcard/sd_test_dir failed, errno %d: %s", errno, strerror(errno));
+		return;
+	}
+
+	const char *path = "/sdcard/sd_test_dir/sd_debug.txt";
+	errno = 0;
+	FILE *f = fopen(path, "w");
+	if (!f) {
+		commands_printf("Failed to open %s for writing, errno %d: %s",
+				path, errno, strerror(errno));
+		return;
+	}
+
+	if (fprintf(f, "sd test ok\n") < 0) {
+		commands_printf("Failed to write %s, errno %d: %s", path, errno, strerror(errno));
+		fclose(f);
+		return;
+	}
+
+	if (fclose(f) != 0) {
+		commands_printf("Failed to close %s, errno %d: %s", path, errno, strerror(errno));
+		return;
+	}
+
+	errno = 0;
+	f = fopen(path, "r");
+	if (!f) {
+		commands_printf("Wrote %s, but failed to reopen it, errno %d: %s",
+				path, errno, strerror(errno));
+		return;
+	}
+
+	char line[32];
+	char *res = fgets(line, sizeof(line), f);
+	fclose(f);
+
+	commands_printf("SD write/read test: %s", res ? line : "read failed");
+}
+
+bool log_mount_nand_flash(int pin_mosi, int pin_miso, int pin_sck, int pin_cs, int freq) {
+	esp_err_t ret;
+
+	const spi_bus_config_t bus_config = {
+			.mosi_io_num = pin_mosi,
+			.miso_io_num = pin_miso,
+			.sclk_io_num = pin_sck,
+			.quadwp_io_num = -1,
+			.quadhd_io_num = -1,
+			.max_transfer_sz = 32,
+	};
+
+	spi_bus_initialize(SPI2_HOST, &bus_config, SPI_DMA_CH_AUTO);
+
+	spi_device_interface_config_t devcfg = {
+			.clock_speed_hz = freq * 1000,
+			.mode = 0,
+			.spics_io_num = pin_cs,
+			.queue_size = 10,
+			.flags = SPI_DEVICE_HALFDUPLEX,
+	};
+
+	spi_device_handle_t spi;
+	spi_bus_add_device(SPI2_HOST, &devcfg, &spi);
+
+	spi_nand_flash_config_t nand_flash_config = {
+			.device_handle = spi,
+	};
+
+	spi_nand_flash_init_device(&nand_flash_config, &nand_flash_device_handle);
+
+	esp_vfs_fat_mount_config_t config = {
+			.max_files = 4,
+			.format_if_mount_failed = true,
+			.allocation_unit_size = 16 * 1024
+	};
+
+	file_basepath = "/nandflash/";
+	ret = esp_vfs_fat_nand_mount("/nandflash", nand_flash_device_handle, &config);
+
+	if (ret != ESP_OK) {
+		return false;
+	}
+
+	return true;
+}
+
+void log_unmount_nand_flash (void) {
+	if (nand_flash_device_handle) {
+		esp_vfs_fat_nand_unmount("/nandflash", nand_flash_device_handle);
+		spi_nand_flash_deinit_device(nand_flash_device_handle);
+		nand_flash_device_handle = 0;
+	}
+}
+
+#ifdef HW_INTERNAL_FS
+void log_unmount_storage(void) {
+	if (m_storage_mounted) {
+		esp_vfs_spiffs_unregister("storage");
+		m_storage_mounted = false;
+	}
+}
+
+esp_err_t log_mount_storage(void) {
+	log_unmount_storage();
+
+	esp_vfs_spiffs_conf_t conf = {
+		.base_path = "/storage",
+		.partition_label = "storage",
+		.max_files = 6,
+		.format_if_mount_failed = true
+	};
+
+	esp_err_t ret = esp_vfs_spiffs_register(&conf);
+	if (ret == ESP_OK) {
+		file_basepath = "/storage/";
+		m_storage_mounted = true;
+	}
+
+	return ret;
+}
+
+esp_err_t log_storage_info(size_t *total, size_t *used) {
+	if (!m_storage_mounted) {
+		return ESP_ERR_INVALID_STATE;
+	}
+
+	return esp_spiffs_info("storage", total, used);
+}
+#endif
+
+bool log_init(void) {
+	for (int i = 0;i < LOG_MAX_FIELDS;i++) {
+		sprintf((char*)m_headers[i].key, "key_h%d", i);
+		sprintf((char*)m_headers[i].name, "name_h%d", i);
+		strcpy((char*)m_headers[i].unit, "");
+		m_headers[i].precision = 2;
+		m_headers[i].is_relative = false;
+		m_headers[i].is_timestamp = false;
+		m_headers[i].value = 0.0;
+		m_headers[i].updated = false;
+	}
+
+	// Special headers
+	strcpy(m_header_ts.key, "t_day");
+	strcpy(m_header_ts.name, "Time");
+	strcpy(m_header_ts.unit, "s");
+	m_header_ts.precision = 3;
+	m_header_ts.is_relative = false;
+	m_header_ts.is_timestamp = true;
+	m_header_ts.value = 0.0;
+	m_header_ts.updated = false;
+
+	strcpy(m_header_ts_gnss.key, "t_day_pos");
+	strcpy(m_header_ts_gnss.name, "Time GNSS");
+	strcpy(m_header_ts_gnss.unit, "s");
+	m_header_ts_gnss.precision = 3;
+	m_header_ts_gnss.is_relative = false;
+	m_header_ts_gnss.is_timestamp = true;
+	m_header_ts_gnss.value = 0.0;
+	m_header_ts_gnss.updated = false;
+
+	strcpy(m_header_lat.key, "gnss_lat");
+	strcpy(m_header_lat.name, "Latitude");
+	strcpy(m_header_lat.unit, "deg");
+	m_header_lat.precision = 7;
+	m_header_lat.is_relative = false;
+	m_header_lat.is_timestamp = false;
+	m_header_lat.value = 0.0;
+	m_header_lat.updated = false;
+
+	strcpy(m_header_lon.key, "gnss_lon");
+	strcpy(m_header_lon.name, "Longitude");
+	strcpy(m_header_lon.unit, "deg");
+	m_header_lon.precision = 7;
+	m_header_lon.is_relative = false;
+	m_header_lon.is_timestamp = false;
+	m_header_lon.value = 0.0;
+	m_header_lon.updated = false;
+
+	strcpy(m_header_alt.key, "gnss_alt");
+	strcpy(m_header_alt.name, "Altitude");
+	strcpy(m_header_alt.unit, "m");
+	m_header_alt.precision = 2;
+	m_header_alt.is_relative = false;
+	m_header_alt.is_timestamp = false;
+	m_header_alt.value = 0.0;
+	m_header_alt.updated = false;
+
+	strcpy(m_header_hacc.key, "gnss_h_acc");
+	strcpy(m_header_hacc.name, "H. Accuracy GNSS");
+	strcpy(m_header_hacc.unit, "m");
+	m_header_hacc.precision = 2;
+	m_header_hacc.is_relative = false;
+	m_header_hacc.is_timestamp = false;
+	m_header_hacc.value = 0.0;
+	m_header_hacc.updated = false;
+
+	strcpy(m_header_hvel.key, "gnss_h_vel");
+	strcpy(m_header_hvel.name, "H. Speed GNSS");
+	strcpy(m_header_hvel.unit, "km/h");
+	m_header_hvel.precision = 2;
+	m_header_hvel.is_relative = false;
+	m_header_hvel.is_timestamp = false;
+	m_header_hvel.value = 0.0;
+	m_header_hvel.updated = false;
+
+	terminal_register_command_callback(
+			"sd_status",
+			"Print SD card mount status, pins and last mount error.",
+			0,
+			terminal_sd_status);
+
+	terminal_register_command_callback(
+			"sd_mount",
+			"Mount SD card over SPI: sd_mount [freq_khz]",
+			"[freq_khz]",
+			terminal_sd_mount);
+
+	terminal_register_command_callback(
+			"sd_unmount",
+			"Unmount SD card.",
+			0,
+			terminal_sd_unmount);
+
+	terminal_register_command_callback(
+			"sd_test",
+			"Write and read /sdcard/sd_debug.txt.",
+			0,
+			terminal_sd_test);
+
+	xTaskCreatePinnedToCore(log_task, "log", 3072, NULL, 8, NULL, tskNO_AFFINITY);
+
+	return true;
+}
+
+void log_process_packet(unsigned char *data, unsigned int len) {
+	COMM_PACKET_ID packet_id = data[0];
+	data++;
+	len--;
+
+	switch (packet_id) {
+	case COMM_LOG_START: {
+		if (m_field_num > 0) {
+			break;
+		}
+
+		char path[30];
+		sprintf(path, "%slog_can", file_basepath);
+		mkdir(path, 0775);
+
+		int32_t ind = 0;
+		m_field_num = buffer_get_int16(data, &ind);
+		m_rate_hz = buffer_get_float32_auto(data, &ind);
+		m_append_time = data[ind++];
+		m_append_gnss = data[ind++];
+		m_append_gnss_time = data[ind++];
+	} break;
+
+	case COMM_LOG_STOP: {
+		m_field_num = 0;
+	} break;
+
+	case COMM_LOG_CONFIG_FIELD: {
+		int32_t ind = 0;
+		int field_ind = buffer_get_int16(data, &ind);
+		if (field_ind >= 0 && field_ind < LOG_MAX_FIELDS) {
+			strncpy((char*)m_headers[field_ind].key, (char*)data + ind, sizeof(m_headers[field_ind].key));
+			m_headers[field_ind].key[sizeof(m_headers[field_ind].key) - 1] = '\0';
+			ind += strlen((char*)(data + ind)) + 1;
+
+			strncpy((char*)m_headers[field_ind].name, (char*)data + ind, sizeof(m_headers[field_ind].name));
+			m_headers[field_ind].name[sizeof(m_headers[field_ind].name) - 1] = '\0';
+			ind += strlen((char*)(data + ind)) + 1;
+
+			strncpy((char*)m_headers[field_ind].unit, (char*)data + ind, sizeof(m_headers[field_ind].unit));
+			m_headers[field_ind].unit[sizeof(m_headers[field_ind].unit) - 1] = '\0';
+			ind += strlen((char*)(data + ind)) + 1;
+
+			m_headers[field_ind].precision = data[ind++];
+			m_headers[field_ind].is_relative = data[ind++];
+			m_headers[field_ind].is_timestamp = data[ind++];
+		}
+	} break;
+
+	case COMM_LOG_DATA_F32: {
+		int32_t ind = 0;
+		int field_ind = buffer_get_int16(data, &ind);
+
+		if (field_ind < 0) {
+			break;
+		}
+
+		while (field_ind < LOG_MAX_FIELDS && ind < len) {
+			m_headers[field_ind].value = buffer_get_float32_auto(data, &ind);
+			m_headers[field_ind].updated = true;
+			field_ind++;
+		}
+	} break;
+
+	case COMM_LOG_DATA_F64: {
+		int32_t ind = 0;
+		int field_ind = buffer_get_int16(data, &ind);
+
+		if (field_ind < 0) {
+			break;
+		}
+
+		while (field_ind < LOG_MAX_FIELDS && ind < len) {
+			m_headers[field_ind].value = buffer_get_float64_auto(data, &ind);
+			m_headers[field_ind].updated = true;
+			field_ind++;
+		}
+	} break;
+
+	default:
+		break;
+	}
+}
