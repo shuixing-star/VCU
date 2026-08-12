@@ -7,7 +7,8 @@ logging, host-communication, and diagnostics gateway connected over CAN.
 
 ```text
 Core (CubeMX generated)
-  -> App
+  -> FreeRTOS ControlTask
+      -> App
       -> Protocol
       -> BSP
           -> STM32 HAL
@@ -20,7 +21,7 @@ be tested on a host computer.
 
 | Module | Responsibility |
 | --- | --- |
-| `vcu_app` | Drain ISR queues, route CAN frames, schedule control and telemetry |
+| `vcu_app` | Bounded ISR-queue drain, CAN routing, control scheduling and telemetry |
 | `vcu_crsf_port` | USART3/PB11, 420000-8N1 receive-only ISR and timestamped byte ring |
 | `vcu_crsf_uart` / `vcu_crsf` | CRSF frame parsing, channels, CRC counters and 150 ms link timeout |
 | `vcu_rc_drive` | Channel normalization, arm/reset extraction and tracked-vehicle mixing |
@@ -43,7 +44,9 @@ would create duplicate CAN callbacks or a duplicate USART3 ISR.
 ## Active control flow
 
 ```text
-CRSF receiver
+FreeRTOS ControlTask (1 ms wake, AboveNormal, 512 words)
+  -> vcu_app_step
+  -> CRSF receiver
   -> USART3 PB11 timestamped bytes
   -> CRSF channels and link state
   -> arm/reset + throttle/steering normalization
@@ -54,7 +57,7 @@ CRSF receiver
 ```
 
 Motor CAN status frames are timestamped in the CAN ISR. Buffered frames retain
-their actual arrival times, so a delayed main loop cannot make old CRSF or motor
+their actual arrival times, so a delayed control task cannot make old CRSF or motor
 feedback appear fresh. A control-loop gap greater than the configured period
 plus 20 ms latches `SCHEDULE_OVERRUN`, sends a disabled zero target, and
 requires an explicit RESET before RUN can be accepted again.
@@ -63,10 +66,10 @@ requires an explicit RESET before RUN can be accepted again.
 
 | Direction | CAN ID | Frame |
 | --- | ---: | --- |
-| motor -> STM32 | `0x1801E002` extended | left status |
-| motor -> STM32 | `0x1801E001` extended | right status |
-| STM32 -> motor | `0x1801E601` extended | left command |
-| STM32 -> motor | `0x1801E600` extended | right command |
+| motor -> STM32 | `0x1801E001` extended | left status (controller ID 1) |
+| motor -> STM32 | `0x1801E002` extended | right status (controller ID 2) |
+| STM32 -> motor | `0x1801E600` extended | left command (controller ID 1) |
+| STM32 -> motor | `0x1801E601` extended | right command (controller ID 2) |
 | STM32 -> ESP32 | `0x680` standard | heartbeat/state |
 | STM32 -> ESP32 | `0x681` standard | CRSF input |
 | STM32 -> ESP32 | `0x682` standard | base/final targets |
@@ -85,11 +88,17 @@ second. This avoids the four-frame burst exceeding the three hardware mailboxes.
 
 ## Timing and safety contract
 
+- FreeRTOS ControlTask wake period: 1 ms; priority AboveNormal; stack 512 words.
+- FreeRTOS heap: 32768 bytes using heap_4.
+- Stack-overflow checking and malloc-failure hooks are enabled.
+- CAN processing is limited to 16 frames per task wake; CRSF draining is limited
+  to four 64-byte chunks per wake to preserve a bounded control execution time.
+- HAL 1 ms timebase uses TIM7, leaving TIM6 available for a future DAC trigger.
 - Default control period: 5 ms; configurable RUN period: 5 to 100 ms.
 - Target slew uses actual elapsed time, not the configured period constant.
 - CRSF link timeout: 150 ms.
 - Motor status safety timeout: 500 ms.
-- Speed-sync feedback timeout: 50 ms; invalid feedback fails closed.
+- Speed-sync feedback timeout: 150 ms; invalid dual-controller feedback fails closed. With exactly one controller online, synchronization is disabled and the offline side target is forced to zero.
 - Speed synchronization update: 20 ms.
 - Arm requires throttle and steering within +/-50 per mille for 500 ms.
 - Startup sends a paired zero-speed, output-disabled transaction immediately
@@ -104,6 +113,7 @@ second. This avoids the four-frame burst exceeding the three hardware mailboxes.
 
 - USART3 is CRSF receive-only on PB11 at 420000 baud; PB10 is not driven.
 - ESP32 and STM32 communicate over CAN1 on PB8/PB9 at 500 kbit/s.
+- CAN RX0/SCE run at NVIC priority 6; CRSF USART3 runs at priority 7.
 - ESP32 UART0 GPIO21/GPIO20 is reserved for the UBlox GPS.
 - One brake analog input represents simultaneous left and right braking.
 - The speed-select outputs and `KS_RELAY` MCU pin are unused.
@@ -121,11 +131,14 @@ CRSF-to-tracked-motor-CAN control chain. It does not yet implement the STM32
 local analog throttle, shared brake analog input, DAC/PWM throttle waveform,
 reverse/hold/parking hard lines, or control-source arbitration. Those need
 confirmed pin activity levels and analog scaling before being enabled.
+Production release also requires an IWDG policy in which only a verified healthy control path
+feeds the watchdog; it is intentionally not enabled during this migration.
 
 ## Verification
 
 The active Keil target builds with ARMCC 5.06 update 5 at zero errors and zero
-warnings. Pure protocol/synchronization/slew regression sources are kept in the
+warnings. The RTOS build uses 21436 bytes of code and 43032 bytes of ZI data.
+Pure protocol/synchronization/slew regression sources are kept in the
 ESP repository `tests` directory; hardware validation still requires CAN trace,
-CRSF loss, feedback timeout, bus-off, reset sequencing, and main-loop stall
+CRSF loss, feedback timeout, bus-off, reset sequencing, and control-task stall
 fault-injection tests on the vehicle bench.

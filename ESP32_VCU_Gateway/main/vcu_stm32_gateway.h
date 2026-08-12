@@ -14,17 +14,8 @@
 #define VCU_STM32_GATEWAY_ID_MOTOR_LEFT VCU_GATEWAY_ID_MOTOR_LEFT
 #define VCU_STM32_GATEWAY_ID_MOTOR_RIGHT VCU_GATEWAY_ID_MOTOR_RIGHT
 #define VCU_STM32_GATEWAY_ID_DIAGNOSTICS VCU_GATEWAY_ID_DIAGNOSTICS
-#define VCU_STM32_GATEWAY_ID_COMMAND VCU_GATEWAY_ID_COMMAND
-
 #define VCU_STM32_GATEWAY_ONLINE_TIMEOUT_MS 500U
 #define VCU_STM32_GATEWAY_TELEMETRY_COUNT 6U
-
-#define VCU_STM32_GATEWAY_COMMAND_NONE VCU_GATEWAY_COMMAND_NONE
-#define VCU_STM32_GATEWAY_COMMAND_RUN VCU_GATEWAY_COMMAND_RUN
-#define VCU_STM32_GATEWAY_COMMAND_STOP VCU_GATEWAY_COMMAND_STOP
-#define VCU_STM32_GATEWAY_COMMAND_RESET VCU_GATEWAY_COMMAND_RESET
-
-typedef vcu_gateway_command_type_t vcu_stm32_gateway_command_type_t;
 
 typedef enum {
     VCU_STM32_GATEWAY_TELEMETRY_HEARTBEAT = 0,
@@ -64,12 +55,6 @@ typedef struct {
     vcu_stm32_gateway_motor_status_t motor_left;
     vcu_stm32_gateway_motor_status_t motor_right;
     vcu_stm32_gateway_diagnostics_t diagnostics;
-
-    uint32_t command_tx_attempt_count;
-    vcu_stm32_gateway_command_type_t last_command_type;
-    uint16_t last_command_period_ms;
-    uint16_t last_command_acceleration_rpm_s;
-    uint8_t last_command_sequence;
 } vcu_stm32_gateway_state_t;
 
 void vcu_stm32_gateway_init(void);
@@ -90,5 +75,9 @@ bool vcu_stm32_gateway_process_can_frame(uint32_t id,
  * evaluated at the time of this call.
  */
 bool vcu_stm32_gateway_get_state(vcu_stm32_gateway_state_t *state);
+
+bool vcu_stm32_gateway_request_stop(void);
+bool vcu_stm32_gateway_request_run(uint16_t period_ms,
+                                    uint16_t acceleration_rpm_s);
 
 #endif

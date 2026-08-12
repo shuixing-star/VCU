@@ -1,14 +1,14 @@
-﻿#include "vcu_app.h"
+#include "vcu_app.h"
 
 #include "vcu_can_port.h"
 #include "vcu_control_telemetry.h"
 #include "vcu_crsf_uart.h"
-#include "vcu_drive_runtime.h"
 #include "vcu_esp_link.h"
-#include "vcu_gateway_protocol.h"
+#include "vcu_drive_runtime.h"
 #include "vcu_motor_can.h"
 
 #define VCU_APP_CONTROL_OVERRUN_MARGIN_MS 20U
+#define VCU_APP_CAN_FRAME_BUDGET 16U
 
 static bool s_initialized;
 static bool s_control_started;
@@ -18,8 +18,8 @@ bool vcu_app_init(void)
 {
     s_last_control_ms = 0U;
     s_control_started = false;
-    vcu_esp_link_init();
     vcu_control_telemetry_init();
+    vcu_esp_link_init();
 
     s_initialized = vcu_crsf_uart_init() &&
                     vcu_motor_can_init() &&
@@ -43,7 +43,7 @@ void vcu_app_step(uint32_t now_ms)
     vcu_drive_runtime_state_t drive;
     uint32_t control_period_ms;
     uint32_t control_elapsed_ms;
-    bool urgent_control = false;
+    uint32_t can_frames_processed = 0U;
 
     if (!s_initialized) {
         return;
@@ -51,14 +51,16 @@ void vcu_app_step(uint32_t now_ms)
 
     vcu_crsf_uart_step(now_ms);
 
-    while (vcu_can_port_read(&frame)) {
-        if (!vcu_motor_can_process_frame(
-                    &frame, frame.received_ms)) {
-            (void)vcu_esp_link_process_frame(&frame);
+    while (can_frames_processed < VCU_APP_CAN_FRAME_BUDGET &&
+           vcu_can_port_read(&frame)) {
+        can_frames_processed++;
+        if (!vcu_esp_link_process_frame(&frame)) {
+            (void)vcu_motor_can_process_frame(
+                    &frame, frame.received_ms);
         }
     }
 
-    while (vcu_esp_link_take_command(&command)) {
+    if (vcu_esp_link_take_command(&command)) {
         switch (command.type) {
         case VCU_GATEWAY_COMMAND_RUN:
             vcu_drive_runtime_request_run(
@@ -67,11 +69,9 @@ void vcu_app_step(uint32_t now_ms)
             break;
         case VCU_GATEWAY_COMMAND_STOP:
             vcu_drive_runtime_request_stop();
-            urgent_control = true;
             break;
         case VCU_GATEWAY_COMMAND_RESET:
             vcu_drive_runtime_request_reset();
-            urgent_control = true;
             break;
         default:
             break;
@@ -89,13 +89,11 @@ void vcu_app_step(uint32_t now_ms)
         control_elapsed_ms =
                 (uint32_t)(now_ms - s_last_control_ms);
 
-        if (urgent_control ||
-            control_elapsed_ms >= control_period_ms) {
+        if (control_elapsed_ms >= control_period_ms) {
             s_last_control_ms = now_ms;
-            if (!urgent_control &&
-                control_elapsed_ms >
-                    control_period_ms +
-                    VCU_APP_CONTROL_OVERRUN_MARGIN_MS) {
+            if (control_elapsed_ms >
+                control_period_ms +
+                VCU_APP_CONTROL_OVERRUN_MARGIN_MS) {
                 vcu_drive_runtime_report_schedule_overrun(now_ms);
             } else {
                 vcu_drive_runtime_step(now_ms, &crsf, &motors);

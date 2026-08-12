@@ -57,7 +57,7 @@ void vcu_speed_sync_default_config(vcu_speed_sync_config_t *config) {
         .large_error_threshold_rpm = 250,
         .large_error_hold_ms = 800U,
         .longitudinal_derate_step_rpm = 100,
-        .minimum_longitudinal_target_rpm = 200,
+        .minimum_longitudinal_target_rpm = 0,
         .max_control_period_ms = 100U,
     };
 }

@@ -32,6 +32,7 @@
 #include "datatypes.h"
 #include "conf_general.h"
 #include "comm_can.h"
+#include "f280_fw_bridge.h"
 #include "terminal.h"
 #include "mempools.h"
 #include "utils.h"
@@ -206,6 +207,7 @@ void commands_init(void) {
 	print_mutex = xSemaphoreCreateMutex();
 	block_sem = xSemaphoreCreateBinary();
 	xTaskCreatePinnedToCore(block_task, "comm_block", 2500, NULL, 7, NULL, tskNO_AFFINITY);
+	f280_fw_bridge_init();
 	init_done = true;
 }
 
@@ -374,6 +376,10 @@ void commands_process_packet(unsigned char *data, unsigned int len,
 
 	case COMM_FORWARD_CAN:
 		send_func_can_fwd = reply_func;
+		if (len >= 2U && f280_fw_bridge_handle(data[0], data + 1,
+				len - 1U, reply_func)) {
+			break;
+		}
 		comm_can_send_buffer(data[0], data + 1, len - 1, 0);
 		break;
 

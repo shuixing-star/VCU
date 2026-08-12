@@ -1,4 +1,4 @@
-﻿#include "vcu_crsf_uart.h"
+#include "vcu_crsf_uart.h"
 
 #include <string.h>
 
@@ -7,6 +7,7 @@
 #define VCU_CRSF_BAUDRATE 420000U
 #define VCU_CRSF_LINK_TIMEOUT_MS 150U
 #define VCU_CRSF_DRAIN_CHUNK_SIZE 64U
+#define VCU_CRSF_DRAIN_CHUNK_BUDGET 4U
 
 static vcu_crsf_t s_parser;
 static bool s_initialized;
@@ -24,6 +25,7 @@ void vcu_crsf_uart_step(uint32_t now_ms)
     uint32_t received_ms[VCU_CRSF_DRAIN_CHUNK_SIZE];
     size_t count;
     size_t index;
+    size_t chunks_processed = 0U;
 
     (void)now_ms;
 
@@ -34,12 +36,14 @@ void vcu_crsf_uart_step(uint32_t now_ms)
     do {
         count = vcu_crsf_port_read(
                 data, received_ms, sizeof(data));
+        chunks_processed++;
         for (index = 0U; index < count; index++) {
             vcu_crsf_feed(
                     &s_parser, &data[index], 1U,
                     received_ms[index]);
         }
-    } while (count == sizeof(data));
+    } while (count == sizeof(data) &&
+             chunks_processed < VCU_CRSF_DRAIN_CHUNK_BUDGET);
 }
 
 bool vcu_crsf_uart_get_state(uint32_t now_ms,

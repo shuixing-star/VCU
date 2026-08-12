@@ -23,6 +23,10 @@
 #define VCU_DIAG_FLAG_UART_OVERFLOW (1U << 1)
 #define VCU_DIAG_FLAG_CAN_RX_ERROR (1U << 2)
 #define VCU_DIAG_FLAG_CAN_TX_ERROR (1U << 3)
+#define VCU_DIAG_FLAG_COMMAND_DUPLICATE (1U << 4)
+#define VCU_DIAG_FLAG_COMMAND_INVALID (1U << 5)
+#define VCU_DIAG_FLAG_COMMAND_RECEIVED (1U << 6)
+#define VCU_DIAG_FLAG_COMMAND_SUPPORTED (1U << 7)
 
 static uint32_t s_last_slot_ms;
 static uint8_t s_slot;
@@ -204,7 +208,7 @@ void vcu_control_telemetry_step(
             (uint16_t)crsf->valid_frame_count,
             (uint16_t)crsf->crc_error_count,
             (uint16_t)vcu_can_port_rx_overflow_count(),
-            0U,
+            VCU_DIAG_FLAG_COMMAND_SUPPORTED,
             s_sequence
         };
 
@@ -219,6 +223,15 @@ void vcu_control_telemetry_step(
         }
         if (vcu_can_port_tx_error_count() != 0U) {
             message.flags |= VCU_DIAG_FLAG_CAN_TX_ERROR;
+        }
+        if (vcu_esp_link_duplicate_command_seen()) {
+            message.flags |= VCU_DIAG_FLAG_COMMAND_DUPLICATE;
+        }
+        if (vcu_esp_link_invalid_command_seen()) {
+            message.flags |= VCU_DIAG_FLAG_COMMAND_INVALID;
+        }
+        if (vcu_esp_link_command_seen()) {
+            message.flags |= VCU_DIAG_FLAG_COMMAND_RECEIVED;
         }
         vcu_gateway_pack_diagnostics(&message, data);
         id = VCU_GATEWAY_ID_DIAGNOSTICS;
