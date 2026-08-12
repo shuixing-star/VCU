@@ -38,6 +38,8 @@ set(COMPONENT_SRCS
 "vcu_drive_runtime.c"
 "mx_can_protocol.c"
 "vcu_gateway_protocol.c"
+"f280_fw_stream.c"
+"f280_fw_bridge.c"
 "vcu_stm32_gateway.c"
 
 "config/confsrc.c"

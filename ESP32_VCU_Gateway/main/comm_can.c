@@ -39,6 +39,7 @@
 #include "mx_can485.h"
 #include "vcu_mx_can_test.h"
 #include "vcu_stm32_gateway.h"
+#include "f280_fw_stream.h"
 #include "soc/gpio_sig_map.h"
 #include <string.h>
 
@@ -122,6 +123,10 @@ static void decode_msg(uint32_t eid, uint8_t *data8, int len, bool is_replaced) 
 
 	uint8_t id = eid & 0xFF;
 	CAN_PACKET_ID cmd = eid >> 8;
+
+	if (f280_fw_stream_handle_can(eid, data8, (uint8_t)len)) {
+		return;
+	}
 
 	if (id == 255 || id == backup.config.controller_id) {
 		switch (cmd) {
@@ -1024,12 +1029,16 @@ void comm_can_transmit_eid(uint32_t id, const uint8_t *data, uint8_t len) {
 }
 
 void comm_can_transmit_sid(uint32_t id, const uint8_t *data, uint8_t len) {
+	(void)comm_can_transmit_sid_checked(id, data, len);
+}
+
+bool comm_can_transmit_sid_checked(uint32_t id, const uint8_t *data, uint8_t len) {
 	if (!init_done) {
-		return;
+		return false;
 	}
 
 	if (len > 8) {
-		len = 8;
+		return false;
 	}
 
 	twai_message_t tx_msg = {0};
@@ -1043,12 +1052,13 @@ void comm_can_transmit_sid(uint32_t id, const uint8_t *data, uint8_t len) {
 
 	if (!init_done) {
 		xSemaphoreGive(send_mutex);
-		return;
+		return false;
 	}
 
-	twai_transmit(&tx_msg, 5);
+	esp_err_t result = twai_transmit(&tx_msg, pdMS_TO_TICKS(5));
 
 	xSemaphoreGive(send_mutex);
+	return result == ESP_OK;
 }
 
 /**

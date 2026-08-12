@@ -22,6 +22,26 @@ bool mx_can_pack_command(const mx_can_command_t *command, uint8_t data[MX_CAN_FR
         return false;
     }
 
+    if (command->reboot) {
+        if (command->reset || command->coast || command->axis1_enable ||
+            command->axis2_enable || command->axis1_target != 0 ||
+            command->axis2_target != 0 || command->axis1_ramp != 0U ||
+            command->axis2_ramp != 0U ||
+            command->axis1_mode != MX_CAN_CONTROL_TORQUE ||
+            command->axis2_mode != MX_CAN_CONTROL_TORQUE) {
+            return false;
+        }
+        data[0] = MX_CAN_REBOOT_CONTROL_MASK;
+        data[1] = 0U;
+        data[2] = 0U;
+        data[3] = 0U;
+        data[4] = 0U;
+        data[5] = 0U;
+        data[6] = 0U;
+        data[7] = MX_CAN_REBOOT_MAGIC;
+        return true;
+    }
+
     data[0] = 0U;
     if (command->axis1_mode == MX_CAN_CONTROL_SPEED) data[0] |= 0x80U;
     if (command->axis2_mode == MX_CAN_CONTROL_SPEED) data[0] |= 0x40U;
@@ -45,11 +65,29 @@ bool mx_can_pack_axis2_speed_command(int16_t target, uint8_t ramp, bool enable, 
         .axis1_enable = false,
         .axis2_enable = enable,
         .reset = false,
+        .reboot = false,
         .coast = false,
         .axis1_target = 0,
         .axis2_target = target,
         .axis1_ramp = 0,
         .axis2_ramp = ramp,
+    };
+    return mx_can_pack_command(&command, data);
+}
+
+bool mx_can_pack_reboot_command(uint8_t data[MX_CAN_FRAME_SIZE]) {
+    const mx_can_command_t command = {
+        .axis1_mode = MX_CAN_CONTROL_TORQUE,
+        .axis2_mode = MX_CAN_CONTROL_TORQUE,
+        .axis1_enable = false,
+        .axis2_enable = false,
+        .reset = false,
+        .reboot = true,
+        .coast = false,
+        .axis1_target = 0,
+        .axis2_target = 0,
+        .axis1_ramp = 0U,
+        .axis2_ramp = 0U,
     };
     return mx_can_pack_command(&command, data);
 }
@@ -94,5 +132,23 @@ const char *mx_can_fault_name(uint8_t fault_code) {
     case 30: return "Joystick fault";
     case 31: return "Throttle fault";
     default: return "Unknown fault code";
+    }
+}
+
+mx_can_fault_action_t mx_can_fault_action(uint8_t fault_code) {
+    switch (fault_code) {
+    case MX_CAN_FAULT_NONE:
+        return MX_CAN_FAULT_ACTION_NONE;
+    case MX_CAN_FAULT_OVERVOLTAGE:
+    case MX_CAN_FAULT_UNDERVOLTAGE:
+    case MX_CAN_FAULT_CONTROLLER_OVERTEMP:
+    case MX_CAN_FAULT_MOTOR_2_OVERTEMP:
+    case MX_CAN_FAULT_MOTOR_1_OVERTEMP:
+    case MX_CAN_FAULT_UART:
+    case MX_CAN_FAULT_RS485:
+    case MX_CAN_FAULT_CAN:
+        return MX_CAN_FAULT_ACTION_AUTO_RECOVER;
+    default:
+        return MX_CAN_FAULT_ACTION_LATCH_STOP;
     }
 }

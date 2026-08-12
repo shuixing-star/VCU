@@ -1,4 +1,4 @@
-﻿#include "vcu_can_port.h"
+#include "vcu_can_port.h"
 
 #include <string.h>
 
@@ -65,8 +65,8 @@ bool vcu_can_port_init(void)
 
     SET_BIT(hcan1.Instance->MCR, CAN_MCR_ABOM);
     CLEAR_BIT(hcan1.Instance->MCR, CAN_MCR_NART);
-    HAL_NVIC_SetPriority(CAN1_RX0_IRQn, 1U, 0U);
-    HAL_NVIC_SetPriority(CAN1_SCE_IRQn, 1U, 1U);
+    HAL_NVIC_SetPriority(CAN1_RX0_IRQn, 6U, 0U);
+    HAL_NVIC_SetPriority(CAN1_SCE_IRQn, 6U, 0U);
 
     if (HAL_CAN_ConfigFilter(&hcan1, &filter) != HAL_OK ||
         HAL_CAN_Start(&hcan1) != HAL_OK ||

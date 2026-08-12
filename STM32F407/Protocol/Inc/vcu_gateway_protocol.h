@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define VCU_GATEWAY_REBOOT_MAGIC 0xA5U
 #define VCU_GATEWAY_PROTOCOL_VERSION 1U
 
 #define VCU_GATEWAY_ID_HEARTBEAT 0x680U

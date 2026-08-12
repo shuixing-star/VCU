@@ -148,16 +148,18 @@ bool vcu_motor_can_init(void)
 {
     memset(&s_ctx, 0, sizeof(s_ctx));
 
+    /* Controller ID 1 is the vehicle-left motor. */
     s_ctx.public_state.controller[VCU_MOTOR_LEFT].status_id =
-            MX_CAN_STATUS_ID + 1U;
+            MX_CAN_STATUS_ID;
     s_ctx.public_state.controller[VCU_MOTOR_LEFT].command_id =
-            MX_CAN_COMMAND_ID + 1U;
+            MX_CAN_COMMAND_ID;
     s_ctx.public_state.controller[VCU_MOTOR_LEFT].direction_sign = -1;
 
+    /* Controller ID 2 is the vehicle-right motor. */
     s_ctx.public_state.controller[VCU_MOTOR_RIGHT].status_id =
-            MX_CAN_STATUS_ID;
+            MX_CAN_STATUS_ID + 1U;
     s_ctx.public_state.controller[VCU_MOTOR_RIGHT].command_id =
-            MX_CAN_COMMAND_ID;
+            MX_CAN_COMMAND_ID + 1U;
     s_ctx.public_state.controller[VCU_MOTOR_RIGHT].direction_sign = 1;
 
     s_ctx.public_state.initialized = vcu_can_port_init();
@@ -243,16 +245,17 @@ bool vcu_motor_can_send_targets(int16_t left_target,
 bool vcu_motor_can_send_reset(void)
 {
     const mx_can_command_t command = {
-        MX_CAN_CONTROL_TORQUE,
-        MX_CAN_CONTROL_TORQUE,
-        false,
-        false,
-        true,
-        false,
-        0,
-        0,
-        0U,
-        0U
+        .axis1_mode = MX_CAN_CONTROL_TORQUE,
+        .axis2_mode = MX_CAN_CONTROL_TORQUE,
+        .axis1_enable = false,
+        .axis2_enable = false,
+        .reset = true,
+        .reboot = false,
+        .coast = false,
+        .axis1_target = 0,
+        .axis2_target = 0,
+        .axis1_ramp = 0U,
+        .axis2_ramp = 0U,
     };
     uint8_t data[VCU_MOTOR_COUNT][MX_CAN_FRAME_SIZE];
     unsigned int index;
@@ -263,4 +266,26 @@ bool vcu_motor_can_send_reset(void)
         }
     }
     return send_controller_pair(data);
+}
+
+bool vcu_motor_can_send_reboot(vcu_motor_index_t controller)
+{
+    uint8_t data[MX_CAN_FRAME_SIZE];
+    vcu_can_port_frame_t frame;
+    const unsigned int index = (unsigned int)controller;
+
+    if (index >= VCU_MOTOR_COUNT ||
+        !mx_can_pack_reboot_command(data) ||
+        !prepare_controller_frame(index, data, &frame)) {
+        return false;
+    }
+    if (!vcu_can_port_send(&frame)) {
+        s_ctx.public_state.tx_failure_count++;
+        return false;
+    }
+
+    s_ctx.public_state.last_tx_count[index]++;
+    memcpy(s_ctx.public_state.last_tx_data[index],
+           data, MX_CAN_FRAME_SIZE);
+    return true;
 }

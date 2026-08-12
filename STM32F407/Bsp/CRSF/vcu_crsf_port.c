@@ -1,4 +1,4 @@
-﻿#include "vcu_crsf_port.h"
+#include "vcu_crsf_port.h"
 
 #include "stm32f4xx_hal.h"
 
@@ -57,7 +57,7 @@ bool vcu_crsf_port_init(uint32_t baudrate)
     USART3->BRR = brr;
     USART3->CR1 = USART_CR1_RE | USART_CR1_RXNEIE;
 
-    HAL_NVIC_SetPriority(USART3_IRQn, 0U, 0U);
+    HAL_NVIC_SetPriority(USART3_IRQn, 7U, 0U);
     HAL_NVIC_EnableIRQ(USART3_IRQn);
     USART3->CR1 |= USART_CR1_UE;
     return true;

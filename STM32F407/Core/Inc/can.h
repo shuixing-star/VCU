@@ -42,7 +42,7 @@ extern CAN_HandleTypeDef hcan1;
 void MX_CAN1_Init(void);
 
 /* USER CODE BEGIN Prototypes */
-/* 用户代码，必须写在配对的BEGIN与END之间，否则CubeMX重新生成后，会被删除掉 */
+/* Keep custom declarations inside this USER CODE block. */
 
 
 

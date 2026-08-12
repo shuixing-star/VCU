@@ -15,7 +15,7 @@
 #define VCU_DRIVE_MAX_ACCEL_RPM_S 2550U
 #define VCU_DRIVE_ACCEL_RAMP_UNIT_RPM_S 10U
 #define VCU_DRIVE_STATUS_TIMEOUT_MS 500U
-#define VCU_SYNC_STATUS_TIMEOUT_MS 50U
+#define VCU_SYNC_STATUS_TIMEOUT_MS 150U
 #define VCU_SYNC_PERIOD_MS 20U
 #define VCU_DRIVE_NEUTRAL_DWELL_MS 500U
 #define VCU_DRIVE_NEUTRAL_PER_MILLE 50
@@ -57,18 +57,10 @@ static int16_t clamp_i32_to_target(int32_t target, int16_t maximum)
 
 static int16_t scale_target(int16_t per_mille, int16_t maximum)
 {
-    int32_t target;
-
     if (per_mille == 0) {
         return 0;
     }
-
-    target = ((int32_t)per_mille * maximum) / 1000;
-    if (target > -VCU_VEHICLE_RPM_DEADZONE &&
-        target < VCU_VEHICLE_RPM_DEADZONE) {
-        return 0;
-    }
-    return (int16_t)target;
+    return (int16_t)(((int32_t)per_mille * maximum) / 1000);
 }
 
 static uint8_t acceleration_to_can_ramp(uint32_t acceleration_rpm_s)
@@ -95,36 +87,58 @@ static bool neutral_controls(const vcu_rc_drive_preview_t *preview)
                    VCU_DRIVE_NEUTRAL_PER_MILLE;
 }
 
-static bool controllers_recent(const vcu_motor_can_state_t *motors,
-                               uint32_t now_ms,
-                               uint32_t timeout_ms)
+static bool controller_recent(const vcu_motor_can_state_t *motors,
+                              unsigned int index,
+                              uint32_t now_ms,
+                              uint32_t timeout_ms)
 {
-    unsigned int index;
+    const vcu_motor_controller_state_t *controller;
 
-    for (index = 0U; index < VCU_MOTOR_COUNT; index++) {
-        const vcu_motor_controller_state_t *controller =
-                &motors->controller[index];
-
-        if (!controller->has_status ||
-            (uint32_t)(now_ms - controller->last_status_ms) >
-                    timeout_ms) {
-            return false;
-        }
+    if (index >= VCU_MOTOR_COUNT) {
+        return false;
     }
-    return true;
+
+    controller = &motors->controller[index];
+    return controller->has_status &&
+           (uint32_t)(now_ms - controller->last_status_ms) <=
+                   timeout_ms;
 }
 
-static bool controllers_fault_free(
-        const vcu_motor_can_state_t *motors)
+static bool any_controller_recent(
+        const vcu_motor_can_state_t *motors,
+        uint32_t now_ms,
+        uint32_t timeout_ms)
 {
+    return controller_recent(motors, VCU_MOTOR_LEFT,
+                             now_ms, timeout_ms) ||
+           controller_recent(motors, VCU_MOTOR_RIGHT,
+                             now_ms, timeout_ms);
+}
+
+static mx_can_fault_action_t online_controllers_fault_action(
+        const vcu_motor_can_state_t *motors,
+        uint32_t now_ms,
+        uint32_t timeout_ms)
+{
+    mx_can_fault_action_t action = MX_CAN_FAULT_ACTION_NONE;
     unsigned int index;
 
     for (index = 0U; index < VCU_MOTOR_COUNT; index++) {
-        if (motors->controller[index].status.fault_code != 0U) {
-            return false;
+        mx_can_fault_action_t controller_action;
+
+        if (!controller_recent(motors, index, now_ms, timeout_ms)) {
+            continue;
+        }
+        controller_action = mx_can_fault_action(
+                motors->controller[index].status.fault_code);
+        if (controller_action == MX_CAN_FAULT_ACTION_LATCH_STOP) {
+            return controller_action;
+        }
+        if (controller_action == MX_CAN_FAULT_ACTION_AUTO_RECOVER) {
+            action = controller_action;
         }
     }
-    return true;
+    return action;
 }
 
 static void reset_normal_control(void)
@@ -202,47 +216,65 @@ static bool run_normal_control(int16_t left_base,
                                uint32_t now_ms,
                                uint32_t elapsed_ms)
 {
-    const bool left_valid =
-            motors->controller[VCU_MOTOR_LEFT].has_status &&
-            (uint32_t)(now_ms -
-                motors->controller[VCU_MOTOR_LEFT].last_status_ms) <=
-                    VCU_SYNC_STATUS_TIMEOUT_MS;
-    const bool right_valid =
-            motors->controller[VCU_MOTOR_RIGHT].has_status &&
-            (uint32_t)(now_ms -
-                motors->controller[VCU_MOTOR_RIGHT].last_status_ms) <=
-                    VCU_SYNC_STATUS_TIMEOUT_MS;
+    const bool left_online = controller_recent(
+            motors, VCU_MOTOR_LEFT, now_ms,
+            VCU_DRIVE_STATUS_TIMEOUT_MS);
+    const bool right_online = controller_recent(
+            motors, VCU_MOTOR_RIGHT, now_ms,
+            VCU_DRIVE_STATUS_TIMEOUT_MS);
+    const bool left_valid = controller_recent(
+            motors, VCU_MOTOR_LEFT, now_ms,
+            VCU_SYNC_STATUS_TIMEOUT_MS);
+    const bool right_valid = controller_recent(
+            motors, VCU_MOTOR_RIGHT, now_ms,
+            VCU_SYNC_STATUS_TIMEOUT_MS);
     vcu_speed_sync_output_t sync = s_ctx.public_state.sync_output;
     int32_t left_limited;
     int32_t right_limited;
     int16_t left_final;
     int16_t right_final;
 
-    if (s_ctx.sync_last_update_ms == 0U ||
-        (uint32_t)(now_ms - s_ctx.sync_last_update_ms) >=
-                VCU_SYNC_PERIOD_MS) {
-        const uint32_t sync_elapsed_ms =
-                s_ctx.sync_last_update_ms == 0U ?
-                VCU_SYNC_PERIOD_MS :
-                (uint32_t)(now_ms - s_ctx.sync_last_update_ms);
-        const vcu_speed_sync_input_t input = {
-            true,
-            left_valid,
-            right_valid,
-            motors->controller[VCU_MOTOR_LEFT].status.fault_code != 0U,
-            motors->controller[VCU_MOTOR_RIGHT].status.fault_code != 0U,
-            (float)sync_elapsed_ms / 1000.0f,
-            motors->controller[VCU_MOTOR_LEFT].status.axis2_speed_rpm,
-            motors->controller[VCU_MOTOR_RIGHT].status.axis2_speed_rpm,
-            left_base,
-            right_base
-        };
+    if (left_online && right_online) {
+        if (s_ctx.sync_last_update_ms == 0U ||
+            (uint32_t)(now_ms - s_ctx.sync_last_update_ms) >=
+                    VCU_SYNC_PERIOD_MS) {
+            const uint32_t sync_elapsed_ms =
+                    s_ctx.sync_last_update_ms == 0U ?
+                    VCU_SYNC_PERIOD_MS :
+                    (uint32_t)(now_ms - s_ctx.sync_last_update_ms);
+            const vcu_speed_sync_input_t input = {
+                true,
+                left_valid,
+                right_valid,
+                motors->controller[VCU_MOTOR_LEFT].status.fault_code != 0U,
+                motors->controller[VCU_MOTOR_RIGHT].status.fault_code != 0U,
+                (float)sync_elapsed_ms / 1000.0f,
+                motors->controller[VCU_MOTOR_LEFT].status.axis2_speed_rpm,
+                motors->controller[VCU_MOTOR_RIGHT].status.axis2_speed_rpm,
+                left_base,
+                right_base
+            };
 
-        if (!vcu_speed_sync_step(&s_ctx.sync_state,
-                                 &s_ctx.sync_config,
-                                 &input, &sync)) {
-            return false;
+            if (!vcu_speed_sync_step(&s_ctx.sync_state,
+                                     &s_ctx.sync_config,
+                                     &input, &sync)) {
+                return false;
+            }
+            s_ctx.public_state.sync_output = sync;
+            s_ctx.sync_last_update_ms = now_ms;
         }
+    } else {
+        vcu_speed_sync_reset(&s_ctx.sync_state);
+        memset(&sync, 0, sizeof(sync));
+        sync.diagnostic_flags = VCU_SYNC_DIAG_DISABLED;
+        if (!left_online) {
+            sync.diagnostic_flags |= VCU_SYNC_DIAG_LEFT_CAN_INVALID;
+        }
+        if (!right_online) {
+            sync.diagnostic_flags |= VCU_SYNC_DIAG_RIGHT_CAN_INVALID;
+        }
+        sync.left_target_rpm = left_online ? left_base : 0;
+        sync.right_target_rpm = right_online ? right_base : 0;
         s_ctx.public_state.sync_output = sync;
         s_ctx.sync_last_update_ms = now_ms;
     }
@@ -260,10 +292,14 @@ static bool run_normal_control(int16_t left_base,
         return false;
     }
 
-    left_final = clamp_i32_to_target(
-            left_limited, s_ctx.public_state.max_target_rpm);
-    right_final = clamp_i32_to_target(
-            right_limited, s_ctx.public_state.max_target_rpm);
+    left_final = left_online ?
+            clamp_i32_to_target(
+                    left_limited,
+                    s_ctx.public_state.max_target_rpm) : 0;
+    right_final = right_online ?
+            clamp_i32_to_target(
+                    right_limited,
+                    s_ctx.public_state.max_target_rpm) : 0;
 
     if (!vcu_motor_can_send_targets(
                 left_final, right_final,
@@ -284,6 +320,7 @@ bool vcu_drive_runtime_init(void)
     memset(&s_ctx, 0, sizeof(s_ctx));
     s_ctx.public_state.state = VCU_DRIVE_STATE_STOPPED;
     s_ctx.public_state.reason = VCU_DRIVE_REASON_INIT;
+    s_ctx.public_state.requested_run = true;
     s_ctx.public_state.period_ms = VCU_DRIVE_DEFAULT_PERIOD_MS;
     s_ctx.public_state.max_target_rpm =
             VCU_DRIVE_DEFAULT_MAX_TARGET_RPM;
@@ -371,7 +408,7 @@ void vcu_drive_runtime_step(uint32_t now_ms,
     vcu_rc_drive_preview_t preview;
     bool reset_edge;
     bool status_recent;
-    bool fault_free;
+    mx_can_fault_action_t fault_action;
     bool neutral;
     uint32_t elapsed_ms;
 
@@ -398,9 +435,10 @@ void vcu_drive_runtime_step(uint32_t now_ms,
     }
     s_ctx.public_state.preview = preview;
 
-    status_recent = controllers_recent(
+    status_recent = any_controller_recent(
             motors, now_ms, VCU_DRIVE_STATUS_TIMEOUT_MS);
-    fault_free = controllers_fault_free(motors);
+    fault_action = online_controllers_fault_action(
+            motors, now_ms, VCU_DRIVE_STATUS_TIMEOUT_MS);
     neutral = neutral_controls(&preview);
     reset_edge = (preview.reset_requested &&
                   !s_ctx.reset_latched) ||
@@ -428,6 +466,7 @@ void vcu_drive_runtime_step(uint32_t now_ms,
         } else {
             s_ctx.reset_stage = VCU_RESET_STAGE_NONE;
             s_ctx.public_state.fault_latched = false;
+            s_ctx.public_state.requested_run = true;
             s_ctx.latched_fault_reason = VCU_DRIVE_REASON_RESET;
             s_ctx.public_state.state = VCU_DRIVE_STATE_DISARMED;
             s_ctx.public_state.reason = VCU_DRIVE_REASON_RESET;
@@ -444,8 +483,11 @@ void vcu_drive_runtime_step(uint32_t now_ms,
     } else if (!status_recent) {
         enter_safe_state(VCU_DRIVE_STATE_DISARMED,
                          VCU_DRIVE_REASON_MOTOR_TIMEOUT, true);
-    } else if (!fault_free) {
+    } else if (fault_action == MX_CAN_FAULT_ACTION_LATCH_STOP) {
         latch_fault(VCU_DRIVE_REASON_MOTOR_FAULT);
+    } else if (fault_action == MX_CAN_FAULT_ACTION_AUTO_RECOVER) {
+        enter_safe_state(VCU_DRIVE_STATE_DISARMED,
+                         VCU_DRIVE_REASON_MOTOR_FAULT, true);
     } else if (!preview.arm_requested) {
         enter_safe_state(VCU_DRIVE_STATE_DISARMED,
                          VCU_DRIVE_REASON_KILL, true);

@@ -43,5 +43,6 @@ bool vcu_motor_can_send_targets(int16_t left_target,
                                 uint8_t ramp,
                                 bool enable);
 bool vcu_motor_can_send_reset(void);
+bool vcu_motor_can_send_reboot(vcu_motor_index_t controller);
 
 #endif
