@@ -46,3 +46,9 @@ Thumbs.db
 /ESP32_VCU_Gateway/tests/__pycache__/
 /STM32F407/MDK-ARM/JLinkSettings.ini
 /c402f439-8587-491c-9b20-3b99d8cd624a.png
+
+# Generated diagnostic build output
+/STM32F407/MDK-ARM/BareMetal/
+/STM32F407/MDK-ARM/FlightLog/
+__pycache__/
+*.pyc

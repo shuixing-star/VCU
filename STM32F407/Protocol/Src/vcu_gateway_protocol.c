@@ -1,4 +1,4 @@
-﻿#include "vcu_gateway_protocol.h"
+#include "vcu_gateway_protocol.h"
 
 #include <stddef.h>
 
@@ -102,6 +102,32 @@ void vcu_gateway_unpack_rc_input(const uint8_t data[8],
     message->sequence = data[7];
 }
 
+void vcu_gateway_pack_can_error(
+        const vcu_gateway_can_error_t *message,
+        uint8_t data[8])
+{
+    data[0] = message->sequence;
+    data[1] = message->type;
+    data[2] = message->flags;
+    data[3] = message->hal_state;
+    data[4] = message->tx_error_count;
+    data[5] = message->rx_error_count;
+    put_u16(&data[6], message->timestamp_10ms);
+}
+
+void vcu_gateway_unpack_can_error(
+        const uint8_t data[8],
+        vcu_gateway_can_error_t *message)
+{
+    message->sequence = data[0];
+    message->type = data[1];
+    message->flags = data[2];
+    message->hal_state = data[3];
+    message->tx_error_count = data[4];
+    message->rx_error_count = data[5];
+    message->timestamp_10ms = get_u16(&data[6]);
+}
+
 void vcu_gateway_pack_targets(const vcu_gateway_targets_t *message,
                               uint8_t data[8])
 {
@@ -164,4 +190,29 @@ void vcu_gateway_unpack_diagnostics(
     message->can_rx_overflows = get_u16(&data[4]);
     message->flags = data[6];
     message->sequence = data[7];
+}
+
+void vcu_gateway_pack_tx_probe(uint8_t sequence, uint16_t timestamp_10ms,
+                               uint8_t part, uint32_t value, uint8_t data[8])
+{
+    unsigned int i;
+    data[0] = sequence;
+    data[1] = (uint8_t)timestamp_10ms;
+    data[2] = (uint8_t)(timestamp_10ms >> 8U);
+    data[3] = part;
+    for (i = 0U; i < 4U; ++i) data[4U + i] = (uint8_t)(value >> (8U * i));
+}
+
+bool vcu_gateway_unpack_tx_probe(const uint8_t data[8], uint8_t *sequence,
+                                 uint16_t *timestamp_10ms, uint8_t *part,
+                                 uint32_t *value)
+{
+    unsigned int i;
+    if (data[3] >= VCU_GATEWAY_TX_PROBE_PARTS) return false;
+    *sequence = data[0];
+    *timestamp_10ms = (uint16_t)((uint16_t)data[1] | ((uint16_t)data[2] << 8U));
+    *part = data[3];
+    *value = 0U;
+    for (i = 0U; i < 4U; ++i) *value |= (uint32_t)data[4U + i] << (8U * i);
+    return true;
 }

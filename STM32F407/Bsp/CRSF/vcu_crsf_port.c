@@ -16,6 +16,32 @@ static uint32_t s_rx_time_ring[VCU_CRSF_RX_RING_SIZE];
 static volatile uint32_t s_error_count;
 static volatile uint32_t s_overflow_count;
 
+/* Latch the first invalid indices; never hide corruption by masking them. */
+typedef struct {
+    uint32_t latched;
+    uint32_t head;
+    uint32_t tail;
+} vcu_crsf_ring_fault_t;
+volatile vcu_crsf_ring_fault_t g_vcu_crsf_ring_fault;
+
+static bool ring_indices_valid(uint16_t head, uint16_t tail)
+{
+    uint32_t primask;
+    if (g_vcu_crsf_ring_fault.latched != 0U) return false;
+    if (head < VCU_CRSF_RX_RING_SIZE && tail < VCU_CRSF_RX_RING_SIZE) return true;
+    primask = __get_PRIMASK();
+    __disable_irq();
+    if (g_vcu_crsf_ring_fault.latched == 0U) {
+        g_vcu_crsf_ring_fault.head = head;
+        g_vcu_crsf_ring_fault.tail = tail;
+        s_error_count++;
+        __DMB();
+        g_vcu_crsf_ring_fault.latched = 1U;
+    }
+    __set_PRIMASK(primask);
+    return false;
+}
+
 bool vcu_crsf_port_init(uint32_t baudrate)
 {
     GPIO_InitTypeDef gpio = {0};
@@ -50,6 +76,9 @@ bool vcu_crsf_port_init(uint32_t baudrate)
     s_rx_tail = 0U;
     s_error_count = 0U;
     s_overflow_count = 0U;
+    g_vcu_crsf_ring_fault.latched = 0U;
+    g_vcu_crsf_ring_fault.head = 0U;
+    g_vcu_crsf_ring_fault.tail = 0U;
 
     USART3->CR1 = 0U;
     USART3->CR2 = 0U;
@@ -73,12 +102,17 @@ size_t vcu_crsf_port_read(uint8_t *data,
         return 0U;
     }
 
-    while (count < capacity && s_rx_tail != s_rx_head) {
+    while (count < capacity) {
+        const uint16_t tail = s_rx_tail;
+        const uint16_t head = s_rx_head;
+        if (!ring_indices_valid(head, tail) || tail == head) break;
         __DMB();
-        data[count] = s_rx_ring[s_rx_tail];
-        received_ms[count] = s_rx_time_ring[s_rx_tail];
+        data[count] = s_rx_ring[tail];
+        received_ms[count] = s_rx_time_ring[tail];
         count++;
-        s_rx_tail = (uint16_t)((s_rx_tail + 1U) & VCU_CRSF_RX_RING_MASK);
+        /* Complete both slot reads before allowing the ISR to reuse it. */
+        __DMB();
+        s_rx_tail = (uint16_t)((tail + 1U) & VCU_CRSF_RX_RING_MASK);
     }
     return count;
 }
@@ -106,15 +140,18 @@ void USART3_IRQHandler(void)
         if (error_flags != 0U) {
             s_error_count++;
         } else {
-            const uint16_t next =
-                    (uint16_t)((s_rx_head + 1U) &
-                               VCU_CRSF_RX_RING_MASK);
+            const uint16_t head = s_rx_head;
+            const uint16_t tail = s_rx_tail;
+            uint16_t next;
+            /* A corrupt current head is unsafe even if next masks in range. */
+            if (!ring_indices_valid(head, tail)) return;
+            next = (uint16_t)((head + 1U) & VCU_CRSF_RX_RING_MASK);
 
-            if (next == s_rx_tail) {
+            if (next == tail) {
                 s_overflow_count++;
             } else {
-                s_rx_ring[s_rx_head] = byte;
-                s_rx_time_ring[s_rx_head] = HAL_GetTick();
+                s_rx_ring[head] = byte;
+                s_rx_time_ring[head] = HAL_GetTick();
                 __DMB();
                 s_rx_head = next;
             }

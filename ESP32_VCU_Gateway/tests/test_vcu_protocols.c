@@ -44,5 +44,33 @@ int main(void) {
     assert(gateway_decoded.acceleration_rpm_s == 2550U);
     assert(gateway_decoded.sequence == 0x42U);
 
+    {
+        const vcu_gateway_can_error_t can_error = {
+            0xA5U,
+            VCU_GATEWAY_CAN_ERROR_HAL_IRQ,
+            3U | VCU_GATEWAY_CAN_ERROR_WARNING |
+                    VCU_GATEWAY_CAN_ERROR_TX,
+            2U,
+            129U,
+            3U,
+            0x1234U
+        };
+        const uint8_t can_error_expected[8] = {
+            0xA5U, 1U, 0x4BU, 2U, 129U, 3U, 0x12U, 0x34U
+        };
+        vcu_gateway_can_error_t can_error_decoded;
+
+        vcu_gateway_pack_can_error(&can_error, data);
+        assert(memcmp(data, can_error_expected, sizeof(data)) == 0);
+        vcu_gateway_unpack_can_error(data, &can_error_decoded);
+        assert(can_error_decoded.sequence == can_error.sequence);
+        assert(can_error_decoded.type == can_error.type);
+        assert(can_error_decoded.flags == can_error.flags);
+        assert(can_error_decoded.hal_state == can_error.hal_state);
+        assert(can_error_decoded.tx_error_count == can_error.tx_error_count);
+        assert(can_error_decoded.rx_error_count == can_error.rx_error_count);
+        assert(can_error_decoded.timestamp_10ms == can_error.timestamp_10ms);
+    }
+
     puts("VCU protocol tests passed"); return 0;
 }

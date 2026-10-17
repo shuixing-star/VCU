@@ -7,6 +7,10 @@
 #include "vcu_drive_runtime.h"
 #include "vcu_motor_can.h"
 
+#ifdef VCU_FLIGHT_LOG_ENABLED
+#include "vcu_flight_log.h"
+#endif
+
 #define VCU_APP_CONTROL_OVERRUN_MARGIN_MS 20U
 #define VCU_APP_CAN_FRAME_BUDGET 16U
 
@@ -16,6 +20,9 @@ static uint32_t s_last_control_ms;
 
 bool vcu_app_init(void)
 {
+#ifdef VCU_FLIGHT_LOG_ENABLED
+    vcu_flight_log_init(vcu_can_port_boot_nonce());
+#endif
     s_last_control_ms = 0U;
     s_control_started = false;
     vcu_control_telemetry_init();
@@ -29,9 +36,11 @@ bool vcu_app_init(void)
         return false;
     }
 
-    s_initialized =
-            vcu_motor_can_send_targets(0, 0, 0U, false);
-    return s_initialized;
+    /* Controllers can boot after the VCU. A failed startup zero must not
+     * enter Error_Handler and prevent all subsequent RX/diagnostics. The
+     * runtime continues zero-output attempts and enforces its normal gates. */
+    (void)vcu_motor_can_send_targets(0, 0, false);
+    return true;
 }
 
 void vcu_app_step(uint32_t now_ms)
@@ -49,11 +58,15 @@ void vcu_app_step(uint32_t now_ms)
         return;
     }
 
+    vcu_can_port_poll();
     vcu_crsf_uart_step(now_ms);
 
     while (can_frames_processed < VCU_APP_CAN_FRAME_BUDGET &&
            vcu_can_port_read(&frame)) {
         can_frames_processed++;
+#ifdef VCU_FLIGHT_LOG_ENABLED
+        vcu_flight_log_rx(&frame);
+#endif
         if (!vcu_esp_link_process_frame(&frame)) {
             (void)vcu_motor_can_process_frame(
                     &frame, frame.received_ms);
@@ -61,6 +74,9 @@ void vcu_app_step(uint32_t now_ms)
     }
 
     if (vcu_esp_link_take_command(&command)) {
+#ifdef VCU_FLIGHT_LOG_ENABLED
+        vcu_flight_log_command((uint8_t)command.type);
+#endif
         switch (command.type) {
         case VCU_GATEWAY_COMMAND_RUN:
             vcu_drive_runtime_request_run(
@@ -103,4 +119,7 @@ void vcu_app_step(uint32_t now_ms)
 
     (void)vcu_drive_runtime_get_state(&drive);
     vcu_control_telemetry_step(now_ms, &crsf, &drive, &motors);
+#ifdef VCU_FLIGHT_LOG_ENABLED
+    vcu_flight_log_step(vcu_can_port_now_ms(), &crsf, &drive, &motors);
+#endif
 }

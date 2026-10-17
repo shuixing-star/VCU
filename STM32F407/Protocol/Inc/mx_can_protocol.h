@@ -4,11 +4,21 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define MX_CAN_COMMAND_ID 0x1801E600UL
-#define MX_CAN_STATUS_ID 0x1801E001UL
+#define MX_CAN_DEFAULT_COMMAND_ID 0x0C01EFD0UL
+#define MX_CAN_DEFAULT_ELECTRICAL_STATUS_ID 0x1801D0EFUL
+#define MX_CAN_DEFAULT_STATE_STATUS_ID 0x1802D0EFUL
 #define MX_CAN_FRAME_SIZE 8U
-#define MX_CAN_REBOOT_CONTROL_MASK 0x10U
-#define MX_CAN_REBOOT_MAGIC 0xA5U
+
+#define MX_CAN_COMMAND_RUN_MASK (1U << 0)
+#define MX_CAN_COMMAND_SPEED_MODE_MASK (1U << 1)
+#define MX_CAN_COMMAND_RESET_ENABLE_MASK (1U << 2)
+
+#define MX_CAN_STATE_RUN_MASK (1U << 0)
+#define MX_CAN_STATE_SPEED_MODE_MASK (1U << 1)
+#define MX_CAN_STATE_RESET_ENABLE_MASK (1U << 2)
+
+#define MX_CAN_MAX_TARGET_RAW 30000
+#define MX_CAN_MAX_BRAKE_CURRENT_A 4000U
 
 typedef enum {
     MX_CAN_FAULT_NONE = 0,
@@ -58,32 +68,45 @@ typedef enum {
 } mx_can_control_mode_t;
 
 typedef struct {
-    mx_can_control_mode_t axis1_mode;
-    mx_can_control_mode_t axis2_mode;
-    bool axis1_enable;
-    bool axis2_enable;
-    bool reset;
-    bool reboot;
-    bool coast;
-    int16_t axis1_target;
-    int16_t axis2_target;
-    uint8_t axis1_ramp;
-    uint8_t axis2_ramp;
+    int16_t torque_deciamps;
+    int16_t speed_rpm;
+    mx_can_control_mode_t mode;
+    bool run;
+    bool reset_enable;
+    uint16_t brake_current_a; /* GED D5-D6: little endian, 1 A/bit. */
+    uint8_t heartbeat;
 } mx_can_command_t;
 
 typedef struct {
-    uint8_t fault_code;
-    uint8_t controller_temperature_c;
-    int16_t axis1_speed_rpm;
-    int16_t axis2_speed_rpm;
     uint16_t supply_voltage_decivolts;
+    int16_t bus_current_deciamps;
+    int16_t phase_current_deciamps;
+    int16_t speed_rpm;
+    int16_t controller_temperature_c;
+    int16_t motor_temperature_c;
+    uint8_t state_flags;
+    uint8_t fault_flags[3];
+    uint8_t heartbeat;
+    uint8_t fault_code;
 } mx_can_status_t;
 
-bool mx_can_pack_command(const mx_can_command_t *command, uint8_t data[MX_CAN_FRAME_SIZE]);
-bool mx_can_pack_axis2_speed_command(int16_t target, uint8_t ramp, bool enable, uint8_t data[MX_CAN_FRAME_SIZE]);
-bool mx_can_pack_reboot_command(uint8_t data[MX_CAN_FRAME_SIZE]);
-bool mx_can_unpack_status(const uint8_t data[MX_CAN_FRAME_SIZE], mx_can_status_t *status);
+bool mx_can_pack_command(const mx_can_command_t *command,
+                         uint8_t data[MX_CAN_FRAME_SIZE]);
+bool mx_can_pack_speed_command(int16_t speed_rpm,
+                               bool run,
+                               uint8_t heartbeat,
+                               uint8_t data[MX_CAN_FRAME_SIZE]);
+bool mx_can_unpack_electrical_status(
+        const uint8_t data[MX_CAN_FRAME_SIZE],
+        mx_can_status_t *status);
+bool mx_can_unpack_state_status(
+        const uint8_t data[MX_CAN_FRAME_SIZE],
+        mx_can_status_t *status);
+bool mx_can_status_has_fault(const mx_can_status_t *status);
+uint8_t mx_can_status_primary_fault_code(const mx_can_status_t *status);
 const char *mx_can_fault_name(uint8_t fault_code);
 mx_can_fault_action_t mx_can_fault_action(uint8_t fault_code);
+mx_can_fault_action_t mx_can_status_fault_action(
+        const mx_can_status_t *status);
 
 #endif

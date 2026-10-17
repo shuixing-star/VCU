@@ -153,6 +153,9 @@ See http://www.FreeRTOS.org/RTOS-Cortex-M3-M4.html. */
 /* Normal assert() semantics without relying on the provision of an assert.h
 header file. */
 /* USER CODE BEGIN 1 */
+/* Diagnostic-only counter: no RTOS calls, allocation, or printing in hook. */
+extern volatile uint32_t g_vcu_task_switch_count;
+#define traceTASK_SWITCHED_IN() (++g_vcu_task_switch_count)
 #define configASSERT( x ) if ((x) == 0) {taskDISABLE_INTERRUPTS(); for( ;; );}
 /* USER CODE END 1 */
 

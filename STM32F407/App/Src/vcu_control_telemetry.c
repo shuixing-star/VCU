@@ -1,4 +1,4 @@
-﻿#include "vcu_control_telemetry.h"
+#include "vcu_control_telemetry.h"
 
 #include <limits.h>
 
@@ -7,7 +7,7 @@
 #include "vcu_gateway_protocol.h"
 
 #define VCU_TELEMETRY_SLOT_PERIOD_MS 5U
-#define VCU_TELEMETRY_SLOT_COUNT 6U
+#define VCU_TELEMETRY_SLOT_COUNT 7U
 
 #define VCU_HEARTBEAT_FLAG_RUN_REQUESTED (1U << 0)
 #define VCU_HEARTBEAT_FLAG_CRSF_LINK (1U << 1)
@@ -31,6 +31,55 @@
 static uint32_t s_last_slot_ms;
 static uint8_t s_slot;
 static uint8_t s_sequence;
+static bool s_can_error_pending;
+static uint8_t s_can_error_part;
+static vcu_can_port_error_event_t s_can_error_event;
+
+static void report_one_can_error(void)
+{
+    vcu_gateway_can_error_t message;
+    uint8_t data[8];
+
+    if (!s_can_error_pending) {
+        s_can_error_pending = vcu_can_port_take_error_event(
+                &s_can_error_event);
+    }
+    if (!s_can_error_pending) {
+        return;
+    }
+
+    if (s_can_error_part != 0U) {
+        const uint8_t part = (uint8_t)(s_can_error_part - 1U);
+        vcu_gateway_pack_tx_probe(s_can_error_event.sequence,
+                s_can_error_event.timestamp_10ms, part,
+                s_can_error_event.tx_probe[part], data);
+        if (vcu_esp_link_send_diagnostic(VCU_GATEWAY_ID_CAN_TX_PROBE, data)) {
+            s_can_error_part++;
+            if (s_can_error_part > VCU_GATEWAY_TX_PROBE_PARTS) {
+                s_can_error_pending = false;
+                s_can_error_part = 0U;
+            }
+        }
+        return;
+    }
+
+    message.sequence = s_can_error_event.sequence;
+    message.type = s_can_error_event.type;
+    message.flags = s_can_error_event.flags;
+    message.hal_state = s_can_error_event.hal_state;
+    message.tx_error_count = s_can_error_event.tx_error_count;
+    message.rx_error_count = s_can_error_event.rx_error_count;
+    message.timestamp_10ms = s_can_error_event.timestamp_10ms;
+    vcu_gateway_pack_can_error(&message, data);
+    if (vcu_esp_link_send_diagnostic(
+                VCU_GATEWAY_ID_CAN_ERROR, data)) {
+        if (s_can_error_event.has_tx_probe) {
+            s_can_error_part = 1U;
+        } else {
+            s_can_error_pending = false;
+        }
+    }
+}
 
 static uint8_t saturating_age_10ms(bool valid,
                                    uint32_t now_ms,
@@ -50,11 +99,19 @@ static bool controller_online(
         const vcu_motor_controller_state_t *controller,
         uint32_t now_ms)
 {
-    return controller->has_status &&
-           (uint32_t)(now_ms - controller->last_status_ms) <= 500U;
+    return vcu_motor_can_controller_recent(controller, now_ms, 500U);
+}
+
+static uint8_t encode_temperature(int16_t temperature_c)
+{
+    if (temperature_c < 0) {
+        return (uint8_t)(int8_t)temperature_c;
+    }
+    return temperature_c > UINT8_MAX ? UINT8_MAX : (uint8_t)temperature_c;
 }
 
 static uint16_t build_fault_flags(
+        const vcu_drive_runtime_state_t *drive,
         const vcu_crsf_uart_state_t *crsf,
         const vcu_motor_can_state_t *motors,
         uint32_t now_ms)
@@ -78,7 +135,8 @@ static uint16_t build_fault_flags(
     if (motors->controller[VCU_MOTOR_RIGHT].status.fault_code != 0U) {
         flags |= (uint16_t)(1U << 4);
     }
-    if (motors->tx_failure_count != 0U) {
+    if (drive->state == VCU_DRIVE_STATE_FAULT &&
+        drive->reason == VCU_DRIVE_REASON_CAN_TX_FAILURE) {
         flags |= (uint16_t)(1U << 5);
     }
     return flags;
@@ -89,6 +147,8 @@ void vcu_control_telemetry_init(void)
     s_last_slot_ms = 0U;
     s_slot = 0U;
     s_sequence = 0U;
+    s_can_error_pending = false;
+    s_can_error_part = 0U;
 }
 
 void vcu_control_telemetry_step(
@@ -109,6 +169,15 @@ void vcu_control_telemetry_step(
     s_last_slot_ms = now_ms;
     s_sequence++;
 
+    /* Motor control may already occupy two of the three TX mailboxes.
+     * Send at most one telemetry/error frame per slot; errors have their
+     * own slot so ordinary telemetry cannot starve them. */
+    if (s_slot == VCU_TELEMETRY_SLOT_COUNT - 1U) {
+        report_one_can_error();
+        s_slot = 0U;
+        return;
+    }
+
     switch (s_slot) {
     case 0U:
     {
@@ -117,7 +186,7 @@ void vcu_control_telemetry_step(
             (uint8_t)drive->state,
             2U,
             0U,
-            build_fault_flags(crsf, motors, now_ms),
+            build_fault_flags(drive, crsf, motors, now_ms),
             (uint8_t)drive->reason,
             s_sequence
         };
@@ -136,8 +205,9 @@ void vcu_control_telemetry_step(
                     &motors->controller[VCU_MOTOR_RIGHT], now_ms)) {
             message.flags |= VCU_HEARTBEAT_FLAG_RIGHT_ONLINE;
         }
-        if (drive->state == VCU_DRIVE_STATE_ARMED &&
-            drive->reason == VCU_DRIVE_REASON_RUNNING) {
+        if ((drive->state == VCU_DRIVE_STATE_ARMED &&
+             drive->reason == VCU_DRIVE_REASON_RUNNING) ||
+            drive->state == VCU_DRIVE_STATE_BRAKING) {
             message.flags |= VCU_HEARTBEAT_FLAG_OUTPUT_ENABLED;
         }
         vcu_gateway_pack_heartbeat(&message, data);
@@ -187,9 +257,9 @@ void vcu_control_telemetry_step(
         const vcu_motor_controller_state_t *controller =
                 &motors->controller[index];
         const vcu_gateway_motor_status_t message = {
-            controller->status.axis2_speed_rpm,
+            controller->status.speed_rpm,
             controller->status.supply_voltage_decivolts,
-            controller->status.controller_temperature_c,
+            encode_temperature(controller->status.controller_temperature_c),
             controller->status.fault_code,
             saturating_age_10ms(
                     controller->has_status,

@@ -43,7 +43,7 @@
 #include "freertos/task.h"
 
 // Settings
-#define CALLBACK_LEN						40
+#define CALLBACK_LEN						64
 
 // Private types
 typedef struct _terminal_callback_struct {
@@ -381,6 +381,10 @@ void terminal_register_command_callback(
 		}
 	}
 
+	if (callback_num >= CALLBACK_LEN) {
+		return;
+	}
+
 	callbacks[callback_num].command = command;
 	callbacks[callback_num].help = help;
 	callbacks[callback_num].arg_names = arg_names;
@@ -388,9 +392,6 @@ void terminal_register_command_callback(
 
 	if (callback_num == callback_write) {
 		callback_write++;
-		if (callback_write >= CALLBACK_LEN) {
-			callback_write = 0;
-		}
 	}
 }
 

@@ -7,13 +7,13 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "cmsis_os.h"
 #include "can.h"
 #include "usart.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "vcu_app.h"
 
 
 /* USER CODE END Includes */
@@ -25,6 +25,8 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+/* Diagnostic setting: make Cortex-M4 buffered store faults precise. */
+#define VCU_FAULT_PRECISE_WRITES 1
 
 /* USER CODE END PD */
 
@@ -36,12 +38,13 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+volatile uint32_t g_vcu_loop_count;
+volatile uint32_t g_vcu_last_loop_ms;
 
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
-void MX_FREERTOS_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -60,13 +63,21 @@ int main(void)
 {
   /* USER CODE BEGIN 1 */
 
-    /* CubeMX initialization remains below; VCU startup is in USER CODE 2. */
+  uint32_t last_step_ms;
+  uint32_t now_ms;
+#if VCU_FAULT_PRECISE_WRITES
+  SCnSCB->ACTLR |= SCnSCB_ACTLR_DISDEFWBUF_Msk;
+  __DSB();
+  __ISB();
+#endif
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
 
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
-  HAL_Init();
+  /* HAL_InitTick uses TIM7 as the 1 ms time base. */
+  if (HAL_Init() != HAL_OK) {
+    Error_Handler();
+  }
 
   /* USER CODE BEGIN Init */
 
@@ -81,30 +92,30 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_USART1_UART_Init();
+ // MX_USART1_UART_Init();
   MX_CAN1_Init();
   /* USER CODE BEGIN 2 */
 
-  /* VCU application startup runs in ControlTask after the scheduler starts. */
+  if (!vcu_app_init()) {
+    Error_Handler();
+  }
+  last_step_ms = HAL_GetTick() - 1U;
   /* USER CODE END 2 */
 
-  /* Init scheduler */
-  osKernelInitialize();
-
-  /* Call init function for freertos objects (in freertos.c) */
-  MX_FREERTOS_Init();
-
-  /* Start scheduler */
-  osKernelStart();
-
-  /* We should never get here as control is now taken by the scheduler */
-  /* Infinite loop */
+  /* Run once per observed tick; never replay a backlog. */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    now_ms = HAL_GetTick();
+    if (now_ms != last_step_ms) {
+      last_step_ms = now_ms;
+      g_vcu_last_loop_ms = now_ms;
+      g_vcu_loop_count++;
+      vcu_app_step(now_ms);
+    }
 
   }
   /* USER CODE END 3 */

@@ -19,8 +19,18 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "can.h"
-
 /* USER CODE BEGIN 0 */
+#include "vcu_motor_config.h"
+
+/* APB1 CAN clock is 42 MHz; 14 time quanta, sample point 85.7%. */
+#if VCU_MOTOR_CAN_BITRATE == 500000UL
+#define VCU_CAN_PRESCALER 6U
+#elif VCU_MOTOR_CAN_BITRATE == 250000UL
+#define VCU_CAN_PRESCALER 12U
+#else
+#error "VCU_MOTOR_CAN_BITRATE must be 250000UL or 500000UL"
+#endif
+
 
 
 /* USER CODE END 0 */
@@ -39,7 +49,7 @@ void MX_CAN1_Init(void)
 
   /* USER CODE END CAN1_Init 1 */
   hcan1.Instance = CAN1;
-  hcan1.Init.Prescaler = 6;
+  hcan1.Init.Prescaler = VCU_CAN_PRESCALER;
   hcan1.Init.Mode = CAN_MODE_NORMAL;
   hcan1.Init.SyncJumpWidth = CAN_SJW_1TQ;
   hcan1.Init.TimeSeg1 = CAN_BS1_11TQ;

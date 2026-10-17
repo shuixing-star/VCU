@@ -1,4 +1,4 @@
-﻿#ifndef VCU_DRIVE_RUNTIME_H
+#ifndef VCU_DRIVE_RUNTIME_H
 #define VCU_DRIVE_RUNTIME_H
 
 #include <stdbool.h>
@@ -14,7 +14,8 @@ typedef enum {
     VCU_DRIVE_STATE_DISARMED,
     VCU_DRIVE_STATE_ARMING_NEUTRAL,
     VCU_DRIVE_STATE_ARMED,
-    VCU_DRIVE_STATE_FAULT
+    VCU_DRIVE_STATE_FAULT,
+    VCU_DRIVE_STATE_BRAKING
 } vcu_drive_state_t;
 
 typedef enum {
@@ -31,25 +32,29 @@ typedef enum {
     VCU_DRIVE_REASON_RUNNING,
     VCU_DRIVE_REASON_CONTROL_FAILURE,
     VCU_DRIVE_REASON_CAN_TX_FAILURE,
-    VCU_DRIVE_REASON_SCHEDULE_OVERRUN
+    VCU_DRIVE_REASON_SCHEDULE_OVERRUN,
+    VCU_DRIVE_REASON_BRAKING
 } vcu_drive_reason_t;
 
 typedef struct {
     bool initialized;
     bool requested_run;
-    bool fault_latched;
+    bool fault_latched; /* Legacy field: false; recover through neutral arming. */
     vcu_drive_state_t state;
     vcu_drive_reason_t reason;
     uint32_t period_ms;
     int16_t max_target_rpm;
-    uint32_t acceleration_rpm_s;
-    uint8_t can_ramp;
+    uint32_t acceleration_rpm_s; /* Legacy field: always 0; controller owns ramp. */
     vcu_rc_drive_preview_t preview;
     int16_t latest_left_base_target;
     int16_t latest_right_base_target;
     int16_t latest_left_target;
     int16_t latest_right_target;
     vcu_speed_sync_output_t sync_output;
+    /* Observation timestamps only; do not participate in control decisions. */
+    uint32_t input_rx_ms;
+    uint32_t control_step_ms;
+    bool input_valid;
     uint32_t loop_count;
     uint32_t drive_tx_count;
     uint32_t zero_tx_count;
@@ -61,6 +66,7 @@ typedef struct {
 
 bool vcu_drive_runtime_init(void);
 uint32_t vcu_drive_runtime_control_period_ms(void);
+/* acceleration_rpm_s is retained for protocol compatibility and ignored. */
 void vcu_drive_runtime_request_run(uint32_t period_ms,
                                    uint32_t acceleration_rpm_s);
 void vcu_drive_runtime_request_stop(void);

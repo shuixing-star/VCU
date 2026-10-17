@@ -1,0 +1,14 @@
+/* Namespaced adapter for STM32 two-frame feedback; legacy ESP parser unchanged. */
+#ifndef VCU_LOG_MOTOR_DECODE_H
+#define VCU_LOG_MOTOR_DECODE_H
+#define mx_can_pack_command vcu_log_mx_can_pack_command
+#define mx_can_pack_speed_command vcu_log_mx_can_pack_speed_command
+#define mx_can_unpack_electrical_status vcu_log_mx_can_unpack_electrical_status
+#define mx_can_unpack_state_status vcu_log_mx_can_unpack_state_status
+#define mx_can_status_has_fault vcu_log_mx_can_status_has_fault
+#define mx_can_status_primary_fault_code vcu_log_mx_can_status_primary_fault_code
+#define mx_can_fault_name vcu_log_mx_can_fault_name
+#define mx_can_fault_action vcu_log_mx_can_fault_action
+#define mx_can_status_fault_action vcu_log_mx_can_status_fault_action
+#include "../STM32F407/Protocol/Inc/mx_can_protocol.h"
+#endif

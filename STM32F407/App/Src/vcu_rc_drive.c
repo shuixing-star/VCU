@@ -10,6 +10,8 @@
 #define VCU_RC_DRIVE_STEERING_CH 1U
 #define VCU_RC_DRIVE_THROTTLE_SIGN 1
 #define VCU_RC_DRIVE_STEERING_SIGN -1
+#define VCU_RC_DRIVE_BRAKE_CH 6U
+#define VCU_RC_DRIVE_BRAKE_THRESHOLD 1500U
 #define VCU_RC_DRIVE_ARM_CH 7U
 #define VCU_RC_DRIVE_RESET_CH 8U
 #define VCU_RC_DRIVE_MIN 172U
@@ -93,6 +95,8 @@ void vcu_rc_drive_get_default_config(vcu_rc_drive_config_t *config)
     config->steering_sign = VCU_RC_DRIVE_STEERING_SIGN;
     config->arm_channel = VCU_RC_DRIVE_ARM_CH;
     config->reset_channel = VCU_RC_DRIVE_RESET_CH;
+    config->brake_channel = VCU_RC_DRIVE_BRAKE_CH;
+    config->brake_threshold = VCU_RC_DRIVE_BRAKE_THRESHOLD;
     config->channel_min = VCU_RC_DRIVE_MIN;
     config->channel_mid = VCU_RC_DRIVE_MID;
     config->channel_max = VCU_RC_DRIVE_MAX;
@@ -115,7 +119,9 @@ bool vcu_rc_drive_preview_from_channels(const uint16_t *channels,
         config->arm_channel < 1U ||
         config->arm_channel > VCU_CRSF_CHANNEL_COUNT ||
         config->reset_channel < 1U ||
-        config->reset_channel > VCU_CRSF_CHANNEL_COUNT) {
+        config->reset_channel > VCU_CRSF_CHANNEL_COUNT ||
+        config->brake_channel < 1U ||
+        config->brake_channel > VCU_CRSF_CHANNEL_COUNT) {
         return false;
     }
 
@@ -127,7 +133,10 @@ bool vcu_rc_drive_preview_from_channels(const uint16_t *channels,
     preview->reset_raw = channels[config->reset_channel - 1U];
     preview->arm_requested = preview->arm_raw >= config->arm_threshold;
     preview->reset_requested = preview->reset_raw <= config->reset_threshold;
-    preview->drive_allowed = link_ok && preview->arm_requested;
+    preview->brake_raw = channels[config->brake_channel - 1U];
+    preview->brake_requested = preview->brake_raw >= config->brake_threshold;
+    preview->drive_allowed = link_ok && preview->arm_requested &&
+                             !preview->brake_requested;
     preview->throttle_per_mille =
             (int16_t)(normalize_channel(preview->throttle_raw, config) *
                       config->throttle_sign);

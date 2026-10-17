@@ -57,6 +57,7 @@
 #include "ble/custom_ble.h"
 #include "mx_can485.h"
 #include "mx_log.h"
+#include "vcu_flight_log.h"
 #include "vcu_stm32_gateway.h"
 #include "vcu_gps.h"
 #include "vcu_control.h"
@@ -212,6 +213,7 @@ void app_main(void) {
 
 #ifdef HW_VCU_STM32_GATEWAY
 	vcu_stm32_gateway_init();
+	vcu_flight_log_init();
 	mx_can485_init();
 	mx_log_init();
 	vcu_gps_init();

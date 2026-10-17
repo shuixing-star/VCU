@@ -1,4 +1,4 @@
-﻿#include "vcu_esp_link.h"
+#include "vcu_esp_link.h"
 
 #include <string.h>
 
@@ -87,4 +87,23 @@ bool vcu_esp_link_send(uint32_t id, const uint8_t data[8])
     frame.data_length = 8U;
     memcpy(frame.data, data, 8U);
     return vcu_can_port_send(&frame);
+}
+
+bool vcu_esp_link_send_diagnostic(uint32_t id, const uint8_t data[8])
+{
+    vcu_can_port_frame_t frame;
+
+    if (data == NULL || id > 0x7FFU) {
+        return false;
+    }
+
+    memset(&frame, 0, sizeof(frame));
+    frame.id = id;
+    frame.data_length = 8U;
+    memcpy(frame.data, data, 8U);
+#ifdef VCU_FLIGHT_LOG_ENABLED
+    return vcu_can_port_send_diagnostic_async(&frame);
+#else
+    return vcu_can_port_send_diagnostic(&frame);
+#endif
 }

@@ -58,6 +58,9 @@ void EXTI4_IRQHandler(void);
 void CAN1_RX0_IRQHandler(void);
 void TIM7_IRQHandler(void);
 /* USER CODE BEGIN EFP */
+void SVC_Handler(void);
+void PendSV_Handler(void);
+void SysTick_Handler(void);
 
 /* USER CODE END EFP */
 

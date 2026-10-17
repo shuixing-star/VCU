@@ -41,8 +41,29 @@ mx_can_status
 vcu_rc_status
 vcu_drive_status
 ```
+Request a guarded motor-controller fault reset through the STM32 VCU:
+
+```text
+vcu_stm32_reset
+```
+
+The STM32 drive state machine sends a safe zero/disabled frame before the
+controller reset frame. Wait at least 100 ms, then run `vcu_drive_status` to
+check the result.
+
 
 `vcu_rc_status` should show:
+
+Capture the latest raw frames between the STM32 VCU and both motor
+controllers:
+
+```text
+vcu_can_raw
+```
+
+The command reports the last data bytes, receive count and age for command,
+electrical-status and state-status IDs on both sides. `never` means that ID has
+not been observed since the ESP32 gateway booted.
 
 ```text
 throttle    : ch3 sign=+1

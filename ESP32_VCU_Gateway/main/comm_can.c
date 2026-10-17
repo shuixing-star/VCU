@@ -39,6 +39,8 @@
 #include "mx_can485.h"
 #include "vcu_mx_can_test.h"
 #include "vcu_stm32_gateway.h"
+#include "vcu_flight_log.h"
+#include "esp_timer.h"
 #include "f280_fw_stream.h"
 #include "soc/gpio_sig_map.h"
 #include <string.h>
@@ -93,6 +95,8 @@ static volatile unsigned int rx_buffer_last_id;
 static volatile unsigned int rx_buffer_response_type = 1;
 
 static twai_message_t rx_buf[RXBUF_LEN];
+static portMUX_TYPE rx_lock = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t rx_queue_lost;
 static volatile int rx_write = 0;
 static volatile int rx_read = 0;
 static volatile bool use_vesc_decoder = true;
@@ -590,17 +594,23 @@ static void rx_task(void *arg) {
 		esp_err_t res = twai_receive(&rx_message, 2);
 
 		if (res == ESP_OK) {
-			rx_buf[rx_write] = rx_message;
-			rx_write++;
-			if (rx_write >= RXBUF_LEN) {
-				rx_write = 0;
-			}
-
-			xSemaphoreGive(proc_sem);
-		}
+#ifdef HW_VCU_STM32_GATEWAY
+            vcu_flight_log_receive(rx_message.identifier,rx_message.data,rx_message.data_length_code,
+                    rx_message.extd,rx_message.rtr,(uint32_t)(esp_timer_get_time()/1000));
+#endif
+            portENTER_CRITICAL(&rx_lock);
+            int next=(rx_write+1)%RXBUF_LEN;
+            if(next==rx_read) rx_queue_lost++;
+            else { rx_buf[rx_write]=rx_message;rx_write=next; }
+            portEXIT_CRITICAL(&rx_lock);
+            xSemaphoreGive(proc_sem);
+        }
 
 		twai_status_info_t status;
 		twai_get_status_info(&status);
+#ifdef HW_VCU_STM32_GATEWAY
+        vcu_flight_log_bus(status.state,status.tx_error_counter,status.rx_error_counter,status.rx_missed_count,status.rx_overrun_count,status.tx_failed_count,status.bus_error_count,rx_queue_lost);
+#endif
 		if (status.state == TWAI_STATE_BUS_OFF || status.state == TWAI_STATE_RECOVERING) {
 			twai_initiate_recovery();
 
@@ -631,16 +641,19 @@ static void process_task(void *arg) {
 	for (;;) {
 		xSemaphoreTake(proc_sem, 10 / portTICK_PERIOD_MS);
 
-		while (rx_read != rx_write) {
-			twai_message_t *msg = &rx_buf[rx_read];
-			rx_read++;
-			if (rx_read >= RXBUF_LEN) {
-				rx_read = 0;
-			}
+        for (;;) {
+            twai_message_t local_message;
+            portENTER_CRITICAL(&rx_lock);
+            if(rx_read==rx_write) { portEXIT_CRITICAL(&rx_lock);break; }
+            local_message=rx_buf[rx_read];rx_read=(rx_read+1)%RXBUF_LEN;
+            portEXIT_CRITICAL(&rx_lock);
+            twai_message_t *msg=&local_message;
 
 			lispif_process_can(msg->identifier, msg->data, msg->data_length_code, msg->extd);
 #ifdef HW_VCU_STM32_GATEWAY
-			vcu_stm32_gateway_process_can_frame(msg->identifier, msg->data, msg->data_length_code, msg->extd);
+            /* Remote-request frames contain no diagnostic payload. */
+            if (!msg->rtr)
+                vcu_stm32_gateway_process_can_frame(msg->identifier, msg->data, msg->data_length_code, msg->extd);
 			mx_can485_process_can_frame(msg->identifier, msg->data, msg->data_length_code, msg->extd);
 #else
 			mx_can485_process_can_frame(msg->identifier, msg->data, msg->data_length_code, msg->extd);

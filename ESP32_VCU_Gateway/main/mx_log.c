@@ -17,6 +17,11 @@
 #include "terminal.h"
 #include "utils.h"
 #include "vcu_stm32_gateway.h"
+#include "vcu_log_sample.h"
+#ifdef HW_VCU_STM32_GATEWAY
+#include "vcu_parking_sample.h"
+#include "vcu_fault_log.h"
+#endif
 #include "vcu_crsf_uart.h"
 #include "vcu_drive_runtime.h"
 #include "vcu_mx_can_test.h"
@@ -120,15 +125,13 @@ static int find_next_log_index(const char *dir_path) {
 }
 
 static bool open_log_file(FILE **file) {
-#ifdef HW_VCU_STM32_GATEWAY
+#ifndef HW_VCU_STM32_GATEWAY
     const char *header =
-            "runtime_ms,stm32_online,crsf_link,drive_state,drive_reason,"
-            "throttle_raw,steering_raw,left_base_rpm,right_base_rpm,"
-            "left_target_rpm,right_target_rpm,left_speed_rpm,right_speed_rpm,"
-            "left_fault,right_fault,left_voltage_v,right_voltage_v,can_rx_overflows\n";
-#else
-    const char *header =
-            "runtime_ms,throttle_raw,steering_raw,left_target_rpm,right_target_rpm,left_axis2_rpm,right_axis2_rpm,left_fault,right_fault,left_voltage_v,right_voltage_v\n";
+            "t_day:Time:s:3:0:1;throttle_raw:Throttle raw::0:0:0;steering_raw:Steering raw::0:0:0;"
+            "left_target_rpm:Left target RPM:rpm:0:0:0;right_target_rpm:Right target RPM:rpm:0:0:0;"
+            "left_axis2_rpm:Left measured RPM:rpm:0:0:0;right_axis2_rpm:Right measured RPM:rpm:0:0:0;"
+            "left_fault:Left fault::0:0:0;right_fault:Right fault::0:0:0;"
+            "left_voltage_v:Left voltage:V:1:0:0;right_voltage_v:Right voltage:V:1:0:0\n";
 #endif
     char dir_path[120];
     make_log_dir(dir_path, sizeof(dir_path));
@@ -145,9 +148,24 @@ static bool open_log_file(FILE **file) {
     }
 
     errno = 0;
-    if (setvbuf(f, m_file_buffer, _IOFBF, sizeof(m_file_buffer)) != 0 ||
-            fprintf(f, "%s", header) < 0) {
-        record_file_error("setvbuf/write header");
+    if (setvbuf(f, m_file_buffer, _IOFBF, sizeof(m_file_buffer)) != 0) {
+        record_file_error("setvbuf");
+        fclose(f);
+        return false;
+    }
+#ifdef HW_VCU_STM32_GATEWAY
+    bool header_ok = fprintf(f, "t_day:Time:s:3:0:1") >= 0;
+    for (unsigned int i = 0; i < VCU_PARKING_CSV_FIELD_COUNT && header_ok; i++) {
+        const vcu_log_field_t *h = vcu_parking_field(vcu_parking_csv_fields[i]);
+        header_ok = fprintf(f, ";%s:%s:%s:%u:0:0",
+                            h->key, h->name, h->unit, h->precision) >= 0;
+    }
+    header_ok = header_ok && fprintf(f, "\n") >= 0;
+#else
+    bool header_ok = fprintf(f, "%s", header) >= 0;
+#endif
+    if (!header_ok) {
+        record_file_error("write header");
         fclose(f);
         return false;
     }
@@ -160,41 +178,25 @@ static bool open_log_file(FILE **file) {
 
 static bool write_sample(FILE *file) {
 #ifdef HW_VCU_STM32_GATEWAY
-    vcu_stm32_gateway_state_t state;
-    const uint32_t now = (uint32_t)utils_ms_tot();
-
-    if (!vcu_stm32_gateway_get_state(&state)) {
+    static vcu_stm32_gateway_state_t state; /* Only the SD task uses this buffer. */
+    static vcu_parking_observer_t observers[2];
+    if (!vcu_stm32_gateway_get_parking_snapshot(&state, observers)) {
         return false;
     }
-
-    return fprintf(file,
-            "%lu,%u,%u,%u,%u,%u,%u,%d,%d,%d,%d,%d,%d,%u,%u,%u.%u,%u.%u,%u\n",
-            (unsigned long)now,
-            state.online,
-            state.has_rc_input &&
-                    (state.rc_input.flags & (1U << 0)) != 0U,
-            state.has_heartbeat ? state.heartbeat.state : 0U,
-            state.has_heartbeat ? state.heartbeat.reason : 0U,
-            state.has_rc_input ? state.rc_input.throttle_raw : 0U,
-            state.has_rc_input ? state.rc_input.steering_raw : 0U,
-            state.has_targets ? state.targets.left_base_rpm : 0,
-            state.has_targets ? state.targets.right_base_rpm : 0,
-            state.has_targets ? state.targets.left_target_rpm : 0,
-            state.has_targets ? state.targets.right_target_rpm : 0,
-            state.has_motor_left ? state.motor_left.speed_rpm : 0,
-            state.has_motor_right ? state.motor_right.speed_rpm : 0,
-            state.has_motor_left ? state.motor_left.fault_code : 0U,
-            state.has_motor_right ? state.motor_right.fault_code : 0U,
-            state.has_motor_left ?
-                    state.motor_left.voltage_decivolts / 10U : 0U,
-            state.has_motor_left ?
-                    state.motor_left.voltage_decivolts % 10U : 0U,
-            state.has_motor_right ?
-                    state.motor_right.voltage_decivolts / 10U : 0U,
-            state.has_motor_right ?
-                    state.motor_right.voltage_decivolts % 10U : 0U,
-            state.has_diagnostics ?
-                    state.diagnostics.can_rx_overflows : 0U) >= 0;
+    static double values[VCU_PARKING_FIELD_COUNT];
+    const uint32_t now = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+    vcu_parking_sample_from_state(&state, observers, now, values);
+    if (fprintf(file, "%.3f", (double)now / 1000.0) < 0) {
+        return false;
+    }
+    for (unsigned int i = 0; i < VCU_PARKING_CSV_FIELD_COUNT; i++) {
+        const unsigned int field = vcu_parking_csv_fields[i];
+        if (fprintf(file, ";%.*f", (int)vcu_parking_field(field)->precision,
+                    (double)values[field]) < 0) {
+            return false;
+        }
+    }
+    return fprintf(file, "\n") >= 0;
 #else
     vcu_crsf_uart_state_t crsf;
     vcu_rc_drive_config_t config;
@@ -211,8 +213,8 @@ static bool write_sample(FILE *file) {
     const uint32_t now = (uint32_t)utils_ms_tot();
 
     return fprintf(file,
-            "%lu,%u,%u,%d,%d,%d,%d,%u,%u,%u.%u,%u.%u\n",
-            (unsigned long)now,
+            "%.3f;%u;%u;%d;%d;%d;%d;%u;%u;%u.%u;%u.%u\n",
+            (double)now / 1000.0,
             preview.throttle_raw,
             preview.steering_raw,
             drive.latest_left_target,
@@ -256,6 +258,15 @@ static void mx_log_task(void *arg) {
         m_log.enabled = false;
     }
 
+#ifdef HW_VCU_STM32_GATEWAY
+    /* Same session number for the main CSV and both event companions. The
+     * existing CAN callback assembles records; only this task writes SD. */
+    if (file && !vcu_fault_log_open(m_log.active_path)) {
+        record_file_error("open fault/trace");
+        m_log.enabled = false;
+    }
+#endif
+
     TickType_t last_wake = xTaskGetTickCount();
     TickType_t last_flush = last_wake;
     while (m_log.enabled) {
@@ -272,6 +283,13 @@ static void mx_log_task(void *arg) {
                 m_log.max_sample_write_ms = elapsed_ms;
             }
             m_log.samples_written++;
+#ifdef HW_VCU_STM32_GATEWAY
+            if (!vcu_fault_log_drain()) {
+                record_file_error("write fault/trace");
+                m_log.enabled = false;
+                break;
+            }
+#endif
 
             if ((xTaskGetTickCount() - last_flush) >= pdMS_TO_TICKS(MX_LOG_FLUSH_INTERVAL_MS)) {
                 if (!flush_log_file(file)) {
@@ -290,6 +308,12 @@ static void mx_log_task(void *arg) {
         vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(m_log.period_ms));
     }
 
+#ifdef HW_VCU_STM32_GATEWAY
+    /* Stop fixes the event boundary; finish waits for packets already in
+     * flight. Keep task_running true until all three files are closed. */
+    vcu_fault_log_stop((uint32_t)utils_ms_tot());
+    if (!vcu_fault_log_finish()) record_file_error("close fault/trace");
+#endif
     if (file) {
         if (!flush_log_file(file)) {
             clearerr(file);
@@ -327,11 +351,17 @@ bool mx_log_start(uint32_t hz) {
     m_log.last_error_operation[0] = '\0';
     m_log.active_path[0] = '\0';
     m_log.enabled = true;
-
     m_log.task_running = true;
+#ifdef HW_VCU_STM32_GATEWAY
+    vcu_fault_log_begin((uint32_t)utils_ms_tot());
+#endif
     BaseType_t res = xTaskCreatePinnedToCore(
             mx_log_task, "mx_log", 4096, NULL, 6, NULL, tskNO_AFFINITY);
     if (res != pdPASS) {
+#ifdef HW_VCU_STM32_GATEWAY
+        vcu_fault_log_stop((uint32_t)utils_ms_tot());
+        if (!vcu_fault_log_finish()) record_file_error("close fault/trace");
+#endif
         m_log.task_running = false;
         m_log.enabled = false;
         return false;
@@ -341,6 +371,9 @@ bool mx_log_start(uint32_t hz) {
 }
 
 void mx_log_stop(void) {
+#ifdef HW_VCU_STM32_GATEWAY
+    vcu_fault_log_stop((uint32_t)utils_ms_tot());
+#endif
     m_log.enabled = false;
 }
 
@@ -381,6 +414,7 @@ static void terminal_mx_log_status(int argc, const char **argv) {
     (void)argv;
 
     commands_printf(
+            /* Recording hosts match this first line exactly. Keep profile in CSV. */
             "VCU log status\n"
             "enabled       : %d\n"
             "task running  : %d\n"
@@ -412,7 +446,7 @@ static void terminal_mx_log_status(int argc, const char **argv) {
 void mx_log_init(void) {
     terminal_register_command_callback(
             "mx_log_start",
-            "Start CSV logging for VCU samples: mx_log_start [hz]",
+            "Start parking/brake CSV: mx_log_start [hz]",
             "[hz]",
             terminal_mx_log_start);
 
